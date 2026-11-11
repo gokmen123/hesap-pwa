@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="tr" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Hesap</title>
+<meta name="description" content="Kişisel para takibi — kategoriler, gelir/gider, aylık özet. Veriler cihazda kalır.">
+<meta name="theme-color" content="#F5F3EE">
+<meta name="color-scheme" content="light dark">
+
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
+
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Hesap">
+<meta name="format-detection" content="telephone=no">
+
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ================= ANA EKRAN ================= -->
+  <section class="view" id="view-home"></section>
+
+  <!-- ================= ÖZET ================= -->
+  <section class="view" id="view-summary"></section>
+
+  <!-- ================= KATEGORİ DETAYI ================= -->
+  <section class="view no-dock" id="view-cat"></section>
+
+  <!-- ================= KATEGORİ YÖNETİMİ ================= -->
+  <section class="view no-dock" id="view-manage"></section>
+
+  <!-- ================= AYARLAR ================= -->
+  <section class="view no-dock" id="view-settings"></section>
+
+</div>
+
+<!-- ================= ALT BAR ================= -->
+<nav class="dock" id="dock" aria-label="Ana gezinme">
+  <button class="tab active" data-go="home" aria-label="Ana Sayfa">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10.8 12 4l8 6.8V20a1 1 0 0 1-1 1h-5.2v-6.2H10.2V21H5a1 1 0 0 1-1-1v-9.2z"/></svg>
+    <span>Ana Sayfa</span>
+  </button>
+
+  <div class="fab" role="group" aria-label="Hareket ekle">
+    <button class="minus" id="fab-minus" aria-label="Gider ekle">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14"/></svg>
+    </button>
+    <div class="divline"></div>
+    <button class="plus" id="fab-plus" aria-label="Gelir ekle">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </div>
+
+  <button class="tab" data-go="summary" aria-label="Özet">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19h16"/><rect x="5.5" y="10" width="3.4" height="7" rx="1"/><rect x="10.3" y="6" width="3.4" height="11" rx="1"/><rect x="15.1" y="8.5" width="3.4" height="8.5" rx="1"/></svg>
+    <span>Özet</span>
+  </button>
+</nav>
+
+<!-- ================= ALT SAYFA ================= -->
+<div class="backdrop" id="backdrop"></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Hareket">
+  <div class="sheet-handle"></div>
+  <div class="sheet-scroll" id="sheet-body"></div>
+</div>
+
+<!-- ================= ONAY ================= -->
+<div class="dialog-wrap" id="dialog">
+  <div class="dialog">
+    <h3 id="dlg-title">Emin misin?</h3>
+    <p id="dlg-body"></p>
+    <div class="dialog-actions">
+      <button class="cancel" id="dlg-cancel">Vazgeç</button>
+      <button class="confirm" id="dlg-ok">Sil</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= HATA AYIKLAMA ================= -->
+<div class="debug-panel" id="debug-panel" role="dialog" aria-modal="true" aria-label="Hata ayıklama">
+  <div class="debug-head">
+    <h2>Hata ayıklama</h2>
+    <button class="debug-close" id="debug-close">Kapat</button>
+  </div>
+  <div class="debug-body" id="debug-body"></div>
+  <div class="debug-actions">
+    <button class="primary" id="debug-copy">Kopyala</button>
+    <button id="debug-clear">Temizle</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="js/format.js"></script>
+<script src="js/db.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
