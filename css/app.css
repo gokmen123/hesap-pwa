@@ -119,7 +119,7 @@ a { color: var(--gold); text-decoration: none; }
 
 .view {
   display: none;
-  padding: var(--safe-top) var(--pad) calc(116px + var(--safe-bot));
+  padding: var(--safe-top) var(--pad) calc(92px + 26px + 20px + var(--safe-bot));
   min-height: 100vh;
   min-height: 100dvh;
   animation: fadeIn 0.22s ease;

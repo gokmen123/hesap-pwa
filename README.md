@@ -1,4 +1,4 @@
-# Hesap — 0.2.0
+# Hesap — 0.2.2
 
 Kişisel para takibi PWA'sı. Kategorilere ayrılmış gelir/gider, her zaman üstte duran toplam bakiye, aylık özet.
 
@@ -71,4 +71,4 @@ Service worker her varlığı **network-first** getirir (6 sn zaman aşımı; a�
 
 ## Sürüm
 
-`0.2.0`. Uygulama sürümü `js/app.js` içindeki `APP_VERSION`; sürüm damgası `version.json`.
+`0.2.2`. Uygulama sürümü `js/app.js` içindeki `APP_VERSION`; sürüm damgası `version.json`.

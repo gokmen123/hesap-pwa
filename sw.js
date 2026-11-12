@@ -5,7 +5,7 @@
    ana ekrandaki simgeyi silip yeniden eklemek GEREKMEZ.
    CACHE_NAME yalnızca çevrimdışı kopyanın adıdır; artırmak zorunlu değil. */
 
-var CACHE_NAME = "hesap-pwa-v4";
+var CACHE_NAME = "hesap-pwa-v5";
 
 var PRECACHE = [
   "./",
