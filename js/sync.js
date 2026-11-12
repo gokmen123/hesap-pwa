@@ -1,4 +1,4 @@
-/* Hesap — Google Drive eşitleme (0.3.4)
+/* Hesap — Google Drive eşitleme (0.3.5)
    Telefondaki IndexedDB her zaman asıl kopyadır (yazmalar önce buraya).
    Açılışta, bağlanınca ve internet gelince: çevrimiçiyken Drive'dan
    Hesap/hesap_yedek.json ÖNCE çekilir (soru yok); üzerine yazmadan önce
@@ -441,12 +441,15 @@ window.DriveSync = (function () {
   /* ================= ÖZET / KARMA ================= */
   function canon(s) {
     var cats = s.categories.map(function (c) {
-      return [c.id, c.name, c.color, c.icon, c.sortOrder || 0];
+      return [c.id, c.name, c.color, c.icon, c.sortOrder || 0, catKind(c), c.deleted ? 1 : 0];
     }).sort(function (a, b) { return a[0] < b[0] ? -1 : 1; });
     var txs = s.transactions.map(function (t) {
       return [t.id, t.type, t.amount, t.categoryId || null, t.note || "", t.date, t.type === "adjust" ? (t.adjustSign === -1 ? -1 : 1) : 0, t.deleted ? 1 : 0];
     }).sort(function (a, b) { return a[0] < b[0] ? -1 : 1; });
-    return JSON.stringify([cats, txs]);
+    var rems = (s.reminders || []).map(function (r) {
+      return [r.id, r.type, Number(r.amount) || 0, r.categoryId || null, r.date || "", r.repeat || "", r.note || "", r.done ? 1 : 0, r.deleted ? 1 : 0];
+    }).sort(function (a, b) { return a[0] < b[0] ? -1 : 1; });
+    return JSON.stringify([cats, txs, rems]);
   }
 
   function fnv(str, seed) {
@@ -533,8 +536,19 @@ window.DriveSync = (function () {
     return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ("x" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
   }
 
+  function catKind(c) {
+    return (c && (c.kind === "income" || c.kind === "expense")) ? c.kind : "both";
+  }
   function sameCat(a, b) {
-    return a.name === b.name && a.color === b.color && a.icon === b.icon && (Number(a.sortOrder) || 0) === (Number(b.sortOrder) || 0);
+    return a.name === b.name && a.color === b.color && a.icon === b.icon &&
+      (Number(a.sortOrder) || 0) === (Number(b.sortOrder) || 0) &&
+      catKind(a) === catKind(b) && !!a.deleted === !!b.deleted;
+  }
+  function sameRem(a, b) {
+    return a.type === b.type && Number(a.amount) === Number(b.amount) &&
+      (a.categoryId || null) === (b.categoryId || null) && a.date === b.date &&
+      (a.repeat || "") === (b.repeat || "") && (a.note || "") === (b.note || "") &&
+      !!a.done === !!b.done && !!a.deleted === !!b.deleted;
   }
   function sameTx(a, b) {
     return a.type === b.type && Number(a.amount) === Number(b.amount) &&
@@ -556,11 +570,18 @@ window.DriveSync = (function () {
     (local.categories || []).forEach(function (c) { cats[c.id] = c; });
     (remoteNorm.cats || []).forEach(function (c) {
       if (!cats[c.id]) { cats[c.id] = c; return; }
-      if (sameCat(cats[c.id], c)) {
-        if (Number(c.updatedAt || 0) > Number(cats[c.id].updatedAt || 0)) cats[c.id] = c;
+      var a = cats[c.id];
+      if (isTomb(a) || isTomb(c)) {
+        var newerC = pickNewer(a, c);
+        if (newerC) { cats[c.id] = newerC; return; }
+        cats[c.id] = isTomb(a) ? a : c;
         return;
       }
-      var n = pickNewer(cats[c.id], c);
+      if (sameCat(a, c)) {
+        if (Number(c.updatedAt || 0) > Number(a.updatedAt || 0)) cats[c.id] = c;
+        return;
+      }
+      var n = pickNewer(a, c);
       if (n) { cats[c.id] = n; return; }
       var copy = {};
       Object.keys(c).forEach(function (k) { copy[k] = c[k]; });
@@ -593,10 +614,34 @@ window.DriveSync = (function () {
       if (copy.note) copy.note = String(copy.note);
       txs[copy.id] = copy;
     });
+    var remMap = {};
+    (local.reminders || []).forEach(function (r) { remMap[r.id] = r; });
+    (remoteNorm.rems || []).forEach(function (r) {
+      if (!remMap[r.id]) { remMap[r.id] = r; return; }
+      var a = remMap[r.id];
+      if (isTomb(a) || isTomb(r)) {
+        var newerR = pickNewer(a, r);
+        if (newerR) { remMap[r.id] = newerR; return; }
+        remMap[r.id] = isTomb(a) ? a : r;
+        return;
+      }
+      if (sameRem(a, r)) {
+        if (Number(r.updatedAt || 0) > Number(a.updatedAt || 0)) remMap[r.id] = r;
+        return;
+      }
+      var nR = pickNewer(a, r);
+      if (nR) { remMap[r.id] = nR; return; }
+      var copyR = {};
+      Object.keys(r).forEach(function (k) { copyR[k] = r[k]; });
+      copyR.id = newId();
+      copyR.updatedAt = Date.now();
+      remMap[copyR.id] = copyR;
+    });
     var catList = Object.keys(cats).map(function (k) { return cats[k]; })
       .sort(function (a, b) { return (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0); });
     var txList = Object.keys(txs).map(function (k) { return txs[k]; });
-    return { cats: catList, txs: txList, theme: (local.settings && local.settings.theme) || remoteNorm.theme };
+    var remList = Object.keys(remMap).map(function (k) { return remMap[k]; });
+    return { cats: catList, txs: txList, rems: remList, theme: (local.settings && local.settings.theme) || remoteNorm.theme };
   }
 
   function needAuth(reason, intent) {
@@ -733,7 +778,7 @@ window.DriveSync = (function () {
       return safetyCopy("Drive'dan çekmeden önce");
     }).then(function () {
       suppressLocal = true;
-      return A.replaceData(norm.cats, norm.txs, norm.theme);
+      return A.replaceData(norm.cats, norm.txs, norm.theme, norm.rems);
     }).then(function () {
       suppressLocal = false;
       return refreshLocalHash();
@@ -773,7 +818,7 @@ window.DriveSync = (function () {
       return safetyCopy("birleştirmeden önce");
     }).then(function () {
       suppressLocal = true;
-      return A.replaceData(merged.cats, merged.txs, merged.theme);
+      return A.replaceData(merged.cats, merged.txs, merged.theme, merged.rems);
     }).then(function () {
       suppressLocal = false;
       return refreshLocalHash();
@@ -879,6 +924,7 @@ window.DriveSync = (function () {
     var m = 0;
     A.state().transactions.forEach(function (t) { if ((t.updatedAt || 0) > m) m = t.updatedAt; });
     A.state().categories.forEach(function (c) { if ((c.updatedAt || 0) > m) m = c.updatedAt; });
+    (A.state().reminders || []).forEach(function (r) { if ((r.updatedAt || 0) > m) m = r.updatedAt; });
     return m;
   }
 
@@ -1130,7 +1176,7 @@ window.DriveSync = (function () {
           var norm = A.normalize(c.data);
           if (norm.error) { A.toast("Kopya okunamadı"); return; }
           safetyCopy("Güvenlik kopyası yüklenmeden önce").then(function () {
-            return A.replaceData(norm.cats, norm.txs, norm.theme);
+            return A.replaceData(norm.cats, norm.txs, norm.theme, norm.rems);
           }).then(function () {
             log("güvenlik kopyası geri yüklendi · " + norm.txs.length + " hareket");
             A.toast("Güvenlik kopyası yüklendi");

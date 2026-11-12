@@ -1,13 +1,14 @@
-/* Hesap — IndexedDB katmanı (hesap-db, şema 1)
+/* Hesap — IndexedDB katmanı (hesap-db, şema 2)
    Miktarlar tam sayı kuruş. Blob saklanmaz; düz JSON nesneleri. */
 window.DB = (function () {
   "use strict";
 
   var DB_NAME = "hesap-db";
-  var DB_VERSION = 1;
+  var DB_VERSION = 2;
   var ST_CAT = "categories";
   var ST_TX = "transactions";
   var ST_SET = "settings";
+  var ST_REM = "reminders";
 
   var dbPromise = null;
   var LOG = [];
@@ -44,7 +45,11 @@ window.DB = (function () {
         if (!db.objectStoreNames.contains(ST_SET)) {
           db.createObjectStore(ST_SET, { keyPath: "key" });
         }
-        log("DEPO", "şema oluşturuldu v" + DB_VERSION);
+        if (!db.objectStoreNames.contains(ST_REM)) {
+          var r = db.createObjectStore(ST_REM, { keyPath: "id" });
+          r.createIndex("date", "date", { unique: false });
+        }
+        log("DEPO", "şema oluşturuldu v" + ev.newVersion);
       };
 
       req.onsuccess = function () { resolve(req.result); };
@@ -133,6 +138,20 @@ window.DB = (function () {
     });
   }
 
+  function putReminder(t) {
+    return open().then(function (db) {
+      var tx = txStore(db, [ST_REM], "readwrite");
+      tx.objectStore(ST_REM).put(t);
+      return txDone(tx).then(function () {
+        return wrap(txStore(db, [ST_REM]).objectStore(ST_REM).get(t.id)).then(function (back) {
+          var ok = !!back && back.amount === t.amount;
+          log("DEPO", "hatırlatma yazıldı " + t.type + " " + t.amount + " doğrulama:" + (ok ? "OK" : "HATA"));
+          return ok;
+        });
+      });
+    });
+  }
+
   function deleteTransaction(id) {
     return open().then(function (db) {
       var tx = txStore(db, [ST_TX], "readwrite");
@@ -179,9 +198,11 @@ window.DB = (function () {
   }
 
   /* Tüm veriyi tek işlemde değiştir (yedek yükleme) */
-  function replaceAll(categories, transactions, settings) {
+  function replaceAll(categories, transactions, settings, reminders) {
     return open().then(function (db) {
-      var tx = txStore(db, [ST_CAT, ST_TX, ST_SET], "readwrite");
+      var names = [ST_CAT, ST_TX, ST_SET];
+      if (db.objectStoreNames.contains(ST_REM)) names.push(ST_REM);
+      var tx = txStore(db, names, "readwrite");
       var cs = tx.objectStore(ST_CAT);
       var ts = tx.objectStore(ST_TX);
       var ss = tx.objectStore(ST_SET);
@@ -189,10 +210,19 @@ window.DB = (function () {
       (categories || []).forEach(function (c) { cs.put(c); });
       (transactions || []).forEach(function (t) { ts.put(t); });
       Object.keys(settings || {}).forEach(function (k) { ss.put({ key: k, value: settings[k] }); });
+      if (db.objectStoreNames.contains(ST_REM)) {
+        var rs = tx.objectStore(ST_REM);
+        rs.clear();
+        (reminders || []).forEach(function (r) { rs.put(r); });
+      }
       return txDone(tx).then(function () {
-        return Promise.all([getAll(ST_CAT), getAll(ST_TX)]).then(function (r) {
+        var jobs = [getAll(ST_CAT), getAll(ST_TX)];
+        if (db.objectStoreNames.contains(ST_REM)) jobs.push(getAll(ST_REM));
+        return Promise.all(jobs).then(function (r) {
           var ok = r[0].length === (categories || []).length && r[1].length === (transactions || []).length;
-          log("DEPO", "toplu yazma kategori:" + r[0].length + " hareket:" + r[1].length + " doğrulama:" + (ok ? "OK" : "HATA"));
+          if (r[2]) ok = ok && r[2].length === (reminders || []).length;
+          log("DEPO", "toplu yazma kategori:" + r[0].length + " hareket:" + r[1].length +
+            (r[2] ? " hatırlatma:" + r[2].length : "") + " doğrulama:" + (ok ? "OK" : "HATA"));
           return ok;
         });
       });
@@ -207,9 +237,12 @@ window.DB = (function () {
 
   function clearAll() {
     return open().then(function (db) {
-      var tx = txStore(db, [ST_CAT, ST_TX], "readwrite");
+      var names = [ST_CAT, ST_TX];
+      if (db.objectStoreNames.contains(ST_REM)) names.push(ST_REM);
+      var tx = txStore(db, names, "readwrite");
       tx.objectStore(ST_CAT).clear();
       tx.objectStore(ST_TX).clear();
+      if (db.objectStoreNames.contains(ST_REM)) tx.objectStore(ST_REM).clear();
       return txDone(tx);
     });
   }
@@ -224,6 +257,7 @@ window.DB = (function () {
     setSetting: setSetting,
     putCategory: putCategory,
     putTransaction: putTransaction,
+    putReminder: putReminder,
     deleteTransaction: deleteTransaction,
     deleteCategory: deleteCategory,
     deleteTransactionsByCategory: deleteTransactionsByCategory,
@@ -231,6 +265,7 @@ window.DB = (function () {
     counts: counts,
     clearAll: clearAll,
     ST_CAT: ST_CAT,
-    ST_TX: ST_TX
+    ST_TX: ST_TX,
+    ST_REM: ST_REM
   };
 })();

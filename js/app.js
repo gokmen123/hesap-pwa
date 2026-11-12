@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "0.3.4";
+  var APP_VERSION = "0.3.5";
 
   /* ================= İKONLAR (yerleşik SVG kümesi) ================= */
   var ICONS = {
@@ -44,7 +44,8 @@
     trash: '<path d="M4.5 6.5h15"/><path d="M9 6.5V4.8a1.3 1.3 0 0 1 1.3-1.3h3.4A1.3 1.3 0 0 1 15 4.8v1.7"/><path d="M6.5 6.5 7.4 19a1.6 1.6 0 0 0 1.6 1.5h6a1.6 1.6 0 0 0 1.6-1.5l.9-12.5"/>',
     edit: '<path d="M4 20h4.2L19.4 8.8a2.1 2.1 0 0 0-3-3L5.2 17V20z"/><path d="M14.5 7.5l3 3"/>',
     share: '<path d="M12 4v10"/><path d="M8 8l4-4 4 4"/><path d="M5 16.5v1.2A2.3 2.3 0 0 0 7.3 20h9.4A2.3 2.3 0 0 0 19 17.7v-1.2"/>',
-    check: '<path d="M5 13l4.5 4.5L19 7"/>'
+    check: '<path d="M5 13l4.5 4.5L19 7"/>',
+    bell: '<path d="M6 9.5a6 6 0 1 1 12 0c0 5 2 6.5 2 6.5H4s2-1.5 2-6.5z"/><path d="M10 18.5a2 2 0 0 0 4 0"/>'
   };
 
   function svg(name, size) {
@@ -71,10 +72,17 @@
   var S = {
     categories: [],
     transactions: [],
+    tombstones: [],
+    reminders: [],
+    remTombs: [],
+    catTombs: [],
     settings: { theme: "auto" },
     view: "home",
     month: Fmt.ymOf(Fmt.todayYMD()),
+    year: new Date().getFullYear(),
+    summaryMode: "month",
     catId: null,
+    catYear: null,
     sheetMode: "new",
     editId: null,
     formType: "expense",
@@ -150,6 +158,45 @@
       n++;
     });
     return { income: inc, expense: exp, adjust: adj, net: inc - exp + adj, count: n };
+  }
+
+  function yearMonths(year) {
+    var rows = [];
+    for (var m = 1; m <= 12; m++) {
+      var key = Fmt.ym(year, m);
+      var mt = monthTotals(key);
+      rows.push({
+        ym: key, month: m,
+        label: Fmt.MONTHS[m - 1], short: Fmt.MONTHS_SHORT[m - 1],
+        income: mt.income, expense: mt.expense, adjust: mt.adjust, net: mt.net, count: mt.count
+      });
+    }
+    return rows;
+  }
+
+  function openingBalance(year) {
+    var start = year + "-01-01";
+    return S.transactions.reduce(function (s, t) {
+      return t.date < start ? s + txEffect(t) : s;
+    }, 0);
+  }
+
+  function yearTotals(year) {
+    var rows = yearMonths(year);
+    var inc = 0, exp = 0, adj = 0, net = 0, n = 0;
+    rows.forEach(function (r) {
+      inc += r.income; exp += r.expense; adj += r.adjust; net += r.net; n += r.count;
+    });
+    return { year: year, income: inc, expense: exp, adjust: adj, net: net, count: n, months: rows, opening: openingBalance(year) };
+  }
+
+  function yearTx(year) {
+    var p = String(year);
+    return S.transactions.filter(function (t) { return String(t.date).slice(0, 4) === p; });
+  }
+
+  function catKindOf(c) {
+    return (c && (c.kind === "income" || c.kind === "expense")) ? c.kind : "both";
   }
 
   function sortTxDesc(a, b) {
@@ -304,7 +351,7 @@
     ok.className = "confirm" + (opts.danger === false ? " neutral" : "");
     /* özel diyaloglar (yedek hedefi) düğme yazılarını değiştirebilir; geri al */
     var cancel = $("#dlg-cancel");
-    if (cancel) cancel.textContent = "Vazgeç";
+    if (cancel) cancel.textContent = opts.cancelText || "Vazgeç";
     wrap.classList.add("show");
     return new Promise(function (res) {
       dlgResolve = res;
@@ -346,7 +393,51 @@
     if (opts.catId !== undefined) S.catId = opts.catId;
     /** kategori detayında ay filtresi: yalnızca özet dağılımından gelindiğinde dolu */
     S.catMonth = (view === "cat" && opts.month) ? opts.month : null;
+    S.catYear = (view === "cat" && opts.year) ? opts.year : null;
     render();
+  }
+
+  /* ================= HATIRLATMALAR ================= */
+  function reminderDueDate(r) { return r.date; }
+
+  function reminderIsDone(r) { return !!(r && r.done) || !!(r && r.deleted); }
+
+  function reminderIsOverdue(r) {
+    if (reminderIsDone(r)) return false;
+    return reminderDueDate(r) < Fmt.todayYMD();
+  }
+
+  function liveReminders() {
+    return (S.reminders || []).slice().sort(function (a, b) {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return (a.createdAt || 0) - (b.createdAt || 0);
+    });
+  }
+
+  function remindersHomeHtml() {
+    var list = liveReminders();
+    var rows = list.filter(function (r) { return !reminderIsDone(r); });
+    var html = '<div class="sec-head"><div class="sec-title">Hatırlatmalar</div>' +
+      '<button class="sec-action" data-act="newReminder">Ekle</button></div>';
+    if (!rows.length) {
+      return html + '<div class="empty"><strong>Hatırlatma yok</strong>Ödeme tarihi gelenleri burada görebilirsin.</div>';
+    }
+    return html + '<div class="rems">' + rows.map(function (r) {
+      var cat = r.categoryId ? catById(r.categoryId) : null;
+      var over = reminderIsOverdue(r);
+      var typ = r.type === "receive" ? "Ödeme al" : "Ödeme yap";
+      var when = over ? "Gecikti · " + Fmt.fullDate(r.date) : Fmt.fullDate(r.date);
+      if (r.repeat === "monthly") when += " · her ay";
+      var sub = typ + " · " + when + (cat ? " · " + cat.name : "") + (r.note ? " · " + r.note : "");
+      return '<div class="rem' + (over ? " over" : "") + '" data-rem="' + esc(r.id) + '">' +
+        '<div class="rem-ico">' + svg("bell") + '</div>' +
+        '<button class="rem-body" data-act="remOpen" data-id="' + esc(r.id) + '">' +
+          '<div class="rem-name">' + esc(typ) + (r.note ? " — " + esc(r.note) : "") + '</div>' +
+          '<div class="rem-sub">' + esc(sub) + '</div></button>' +
+        '<div class="rem-amt ' + (r.type === "receive" ? "get" : "pay") + '">' + Fmt.money(r.amount) + '</div>' +
+        '<button class="rem-cal" data-act="remIcs" data-id="' + esc(r.id) + '" aria-label="Takvime ekle">' + svg("cal") + '</button>' +
+      '</div>';
+    }).join("") + '</div>';
   }
 
   /* ================= RENDER: ANA EKRAN ================= */
@@ -363,7 +454,7 @@
     var catsHtml = "";
     if (!S.categories.length) {
       catsHtml = '<div class="empty"><strong>Henüz kategori yok</strong>' +
-        'Kategori eklemek için yukarıdaki “Düzenle”ye dokun.</div>';
+        'Kategori eklemek için “+ Yeni kategori”ye dokun.</div>';
     } else {
       catsHtml = S.categories.slice().sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); })
         .map(function (c) {
@@ -409,11 +500,15 @@
       '</div>' +
 
       '<div class="sec-head"><div class="sec-title">Kategoriler</div>' +
-        '<button class="sec-action" data-act="manage">Düzenle</button></div>' +
+        '<div class="sec-actions">' +
+          '<button class="sec-action" data-act="newCat" id="btn-new-cat">+ Yeni kategori</button>' +
+        '</div></div>' +
       (window.DriveSync && DriveSync.configured()
         ? '<div id="drv-slot">' + DriveSync.bannerHtml() + '</div>'
         : backupBannerHtml()) +
       '<div class="cats">' + catsHtml + '</div>' +
+
+      remindersHomeHtml() +
 
       '<div class="sec-head"><div class="sec-title">Son hareketler</div></div>' +
       '<div class="recent">' + recentHtml + '</div>';
@@ -445,23 +540,43 @@
   }
 
   /* ================= RENDER: KATEGORİ DETAYI ================= */
+  function catFabsHtml(c) {
+    var kind = catKindOf(c);
+    var html = '<div class="cat-fabs">';
+    if (kind !== "income") {
+      html += '<button class="cat-fab minus" data-act="catAdd" data-type="expense" data-cat="' + esc(c.id) + '">' +
+        svg("minus") + " Gider</button>";
+    }
+    if (kind !== "expense") {
+      html += '<button class="cat-fab plus" data-act="catAdd" data-type="income" data-cat="' + esc(c.id) + '">' +
+        svg("plus") + " Gelir</button>";
+    }
+    html += "</div>";
+    return html;
+  }
+
   R.catDetail = function () {
     var c = catById(S.catId);
     if (!c) { S.view = "home"; R.home(); return; }
-    /* ay filtresi: yalnızca özet dağılımından gelindiğinde o ayki hareketler */
-    var only = S.catMonth;
+    var onlyMonth = S.catMonth;
+    var onlyYear = S.catYear;
     var list = S.transactions.filter(function (t) {
       if (t.categoryId !== c.id) return false;
-      return only ? Fmt.ymOf(t.date) === only : true;
+      if (onlyMonth) return Fmt.ymOf(t.date) === onlyMonth;
+      if (onlyYear) return String(t.date).slice(0, 4) === String(onlyYear);
+      return true;
     }).sort(sortTxDesc);
-    var bal = catBalance(c.id);
+    var bal = 0;
+    list.forEach(function (t) { bal += txEffect(t); });
+    if (!onlyMonth && !onlyYear) bal = catBalance(c.id);
     var cls = bal > 0 ? "pos" : (bal < 0 ? "neg" : "zero");
-    var ym = Fmt.monthLabel(only || S.month);
+    var period = onlyMonth ? Fmt.monthLabel(onlyMonth) : (onlyYear ? String(onlyYear) : "Tüm zamanlar");
+    var fromOzet = !!(onlyMonth || onlyYear);
 
     var body = "";
     if (!list.length) {
       body = '<div class="empty"><strong>Bu kategoride hareket yok</strong>' +
-        'Alt ortadaki + / − ile ilk hareketi ekleyebilirsin.</div>';
+        'Aşağıdaki + / − ile ilk hareketi ekleyebilirsin.</div>';
     } else {
       var lastDay = null;
       body = list.map(function (t) {
@@ -474,122 +589,239 @@
 
     $("#view-cat").innerHTML =
       '<div class="nav-back">' +
-        '<button class="back" data-act="back">' + svg("chevL") + (only ? 'Özet' : 'Ana Sayfa') + '</button>' +
+        '<button class="back" data-act="back">' + svg("chevL") + (fromOzet ? "Özet" : "Ana Sayfa") + "</button>" +
         '<button class="link-gold" data-act="editCat" data-id="' + esc(c.id) + '">Düzenle</button>' +
-      '</div>' +
+      "</div>" +
       '<div class="cat-hero" style="' + catStyle(c) + '">' +
-        '<div class="big-ico">' + svg(c.icon) + '</div>' +
-        '<div><h1>' + esc(c.name) + '</h1>' +
-          '<div class="sum ' + cls + '">' + Fmt.plainSgn(bal) + ' TL</div>' +
-          '<div class="meta">' + list.length + ' hareket · ' + esc(ym) + '</div>' +
-        '</div>' +
-      '</div>' +
-      '<div class="tx-list">' + body + '</div>';
+        '<div class="big-ico">' + svg(c.icon) + "</div>" +
+        "<div><h1>" + esc(c.name) + "</h1>" +
+          '<div class="sum ' + cls + '" id="cat-balance">' + Fmt.plainSgn(bal) + " TL</div>" +
+          '<div class="meta">' + list.length + " hareket · " + esc(period) + "</div>" +
+        "</div>" +
+      "</div>" +
+      catFabsHtml(c) +
+      '<div class="tx-list">' + body + "</div>";
   };
 
   /* ================= RENDER: ÖZET ================= */
   R.summary = function () {
-    var ym = S.month;
-    var mt = monthTotals(ym);
-    var list = monthTx(ym);
-    var maxBase = Math.max(mt.income, mt.expense);
-    var inPct = maxBase > 0 ? Math.max(2, (mt.income / maxBase) * 100) : 0;
-    var outPct = maxBase > 0 ? Math.max(2, (mt.expense / maxBase) * 100) : 0;
+    var mode = S.summaryMode === "year" ? "year" : "month";
+    var seg = '<div class="mode-seg' + (mode === "year" ? " year" : "") + '">' +
+      '<div class="mode-pill"></div>' +
+      '<button type="button" data-act="sumMode" data-mode="month" class="' + (mode === "month" ? "on" : "") + '">Ay</button>' +
+      '<button type="button" data-act="sumMode" data-mode="year" class="' + (mode === "year" ? "on" : "") + '">Yıl</button>' +
+      '</div>';
+    if (mode === "year") {
+      document.getElementById("view-summary").innerHTML = seg + renderYearSummary();
+      return;
+    }
+    var mt = monthTotals(S.month);
+    var list = monthTx(S.month).sort(sortTxDesc);
+    var netClass = mt.net > 0 ? " pos" : (mt.net < 0 ? " neg" : " zero");
+    var incPct = mt.income + mt.expense > 0 ? (mt.income / (mt.income + mt.expense) * 100) : 0;
+    var expPct = mt.income + mt.expense > 0 ? (mt.expense / (mt.income + mt.expense) * 100) : 0;
 
-    var netCls = mt.net > 0 ? "" : (mt.net < 0 ? " neg" : " zero");
-    var netTxt = mt.net > 0 ? "+" + Fmt.money(mt.net) : Fmt.plainSgn(mt.net);
-
-    /* gider dağılımı */
     var byCat = {};
     list.forEach(function (t) {
       if (t.type !== "expense") return;
-      var k = t.categoryId || "__none";
-      byCat[k] = (byCat[k] || 0) + t.amount;
+      var k = t.categoryId || "_";
+      if (!byCat[k]) byCat[k] = 0;
+      byCat[k] += t.amount;
     });
-    var dist = Object.keys(byCat).map(function (k) {
-      var c = k === "__none" ? null : catById(k);
-      return {
-        id: k,
-        name: c ? c.name : "Kategorisiz",
-        color: c ? c.color : "#8E877C",
-        amount: byCat[k]
-      };
+    var parts = Object.keys(byCat).map(function (k) {
+      var c = k === "_" ? { name: "Kategorisiz", color: "#8E877C", icon: "tag", id: null } : catById(k);
+      return { id: k === "_" ? null : k, name: c ? c.name : "Kategorisiz", color: c ? c.color : "#8E877C", icon: c ? c.icon : "tag", amount: byCat[k] };
     }).sort(function (a, b) { return b.amount - a.amount; });
 
-    var totalExp = mt.expense;
-    var distHtml;
-    if (!dist.length || totalExp <= 0) {
-      distHtml = '<div class="empty"><strong>Bu ay gider yok</strong>' +
-        'Gider eklenince dağılım burada görünür.</div>';
-    } else {
-      var acc = 0, segs = [];
-      var gap = dist.length > 1 ? 0.45 : 0;
-      dist.forEach(function (d, i) {
-        var start = acc;
-        acc += (d.amount / totalExp) * 100;
-        var end = i === dist.length - 1 ? 100 : acc;
-        segs.push(d.color + " " + start.toFixed(2) + "% " + end.toFixed(2) + "%");
-        if (i < dist.length - 1) {
-          segs.push("var(--card) " + end.toFixed(2) + "% " + (end + gap).toFixed(2) + "%");
-        }
+    var donut = "", legend = "", totalExp = mt.expense;
+    if (parts.length) {
+      var acc = 0, circ = 2 * Math.PI * 36;
+      donut = '<svg class="donut" viewBox="0 0 80 80" aria-hidden="true">';
+      parts.forEach(function (p) {
+        var len = (p.amount / totalExp) * circ;
+        donut += '<circle cx="40" cy="40" r="36" fill="none" stroke="' + p.color + '" stroke-width="8" ' +
+          'stroke-dasharray="' + len + " " + (circ - len) + '" stroke-dashoffset="' + (-acc) + '"/>';
+        acc += len;
       });
-      var legend = dist.map(function (d) {
-        var p = Math.round((d.amount / totalExp) * 100);
-        return '<button class="leg" data-dist="' + esc(d.id) + '">' +
-          '<i style="background:' + esc(d.color) + '"></i>' +
-          '<div style="flex:1;min-width:0"><div class="ln">' + esc(d.name) + '</div>' +
-          '<div class="lv">' + Fmt.money(d.amount) + ' TL</div></div>' +
-          '<div class="lp">%' + p + '</div></button>';
+      donut += "</svg>";
+      legend = parts.map(function (p) {
+        var pct = totalExp ? Math.round(p.amount / totalExp * 100) : 0;
+        var open = p.id
+          ? ' type="button" data-act="openCatMonth" data-id="' + esc(p.id) + '" data-month="' + esc(S.month) + '"'
+          : " type=\"button\" disabled";
+        return '<button class="leg"' + open + '>' +
+          '<div class="swatch" style="background:' + p.color + '"></div>' +
+          '<div class="name">' + esc(p.name) + " · " + pct + "%</div>" +
+          '<div class="amt">−' + Fmt.money(p.amount) + "</div></button>";
       }).join("");
-
-      distHtml =
-        '<div class="dist-body">' +
-          '<div class="donut-wrap"><div class="donut" style="background:conic-gradient(from -90deg,' + segs.join(",") + ')"></div>' +
-            '<div class="donut-hole"><div class="dlab">Gider</div>' +
-            '<div class="dnum">' + Fmt.money(totalExp) + '</div></div>' +
-          '</div>' +
-          '<div class="legend">' + legend + '</div>' +
-        '</div>';
+    } else {
+      donut = '<div class="empty" style="padding:20px 0">Bu ay gider yok</div>';
     }
 
-    var top = list.filter(function (t) { return t.type === "expense"; })
-      .sort(function (a, b) { return b.amount - a.amount; }).slice(0, 3);
-    var topHtml = !top.length
-      ? '<div class="empty"><strong>Bu ay gider yok</strong>En büyük giderler burada listelenir.</div>'
-      : top.map(function (t) { return txRowHtml(t); }).join("");
+    var top = list.filter(function (t) { return t.type === "expense"; }).slice(0, 6).map(function (t) {
+      var c = t.categoryId ? catById(t.categoryId) : null;
+      return '<div class="tx">' +
+        '<div class="tx-ico" style="--cat:' + (c ? c.color : "#8E877C") + '">' + svg(c ? c.icon : "tag") + "</div>" +
+        '<div class="tx-body"><div class="tx-name">' + esc(c ? c.name : "Kategorisiz") + "</div>" +
+        '<div class="tx-sub">' + Fmt.fullDate(t.date) + (t.note ? " · " + esc(t.note) : "") + "</div></div>" +
+        '<div class="tx-amt out">−' + Fmt.money(t.amount) + "</div></div>";
+    }).join("");
 
-    $("#view-summary").innerHTML =
-      '<div class="topbar">' +
-        '<div class="brand"><div class="brand-mark">' +
-          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 6v12M17 6v12M7 12h10"/></svg>' +
-        '</div><div class="brand-name">Hesap</div></div>' +
-        '<button class="icon-btn" data-act="settings" aria-label="Ayarlar">' + svg("gear") + '</button>' +
-      '</div>' +
+    document.getElementById("view-summary").innerHTML = seg +
+      '<div class="month-nav">' +
+        '<button data-act="prevMonth" aria-label="Önceki ay">' + svg("chevL") + "</button>" +
+        '<div class="label">' + Fmt.monthLabel(S.month) + "</div>" +
+        '<button data-act="nextMonth" aria-label="Sonraki ay">' + svg("chevR") + "</button>" +
+      "</div>" +
 
-      '<div class="month-nav"><h1>' + esc(Fmt.monthLabel(ym)) + '</h1>' +
-        '<div class="chev-pair">' +
-          '<button class="icon-btn" data-act="prevMonth" aria-label="Önceki ay">' + svgBold("chevL") + '</button>' +
-          '<button class="icon-btn" data-act="nextMonth" aria-label="Sonraki ay">' + svgBold("chevR") + '</button>' +
-        '</div></div>' +
-
-      '<div class="net-card">' +
+      '<div class="net-card' + netClass + '">' +
         '<div class="lab">Bu ay net</div>' +
-        '<div class="net' + netCls + '"><span class="num">' + netTxt + '</span><span class="ccy">TL</span></div>' +
+        '<div class="amt">' + Fmt.sgn(mt.net) + "</div>" +
         '<div class="bars">' +
-          '<div class="bar-row"><div class="bar-meta"><span class="k">Gelir</span>' +
-            '<span class="v in">' + Fmt.money(mt.income) + '</span></div>' +
-            '<div class="track"><i class="in" style="width:' + inPct.toFixed(2) + '%"></i></div></div>' +
-          '<div class="bar-row"><div class="bar-meta"><span class="k">Gider</span>' +
-            '<span class="v out">' + Fmt.money(mt.expense) + '</span></div>' +
-            '<div class="track"><i class="out" style="width:' + outPct.toFixed(2) + '%"></i></div></div>' +
-        '</div>' +
-      '</div>' +
+          '<div class="row"><div class="name">Gelir</div><div class="track"><i class="in" style="width:' + incPct + '%"></i></div>' +
+            '<div class="val in">+' + Fmt.money(mt.income) + "</div></div>" +
+          '<div class="row"><div class="name">Gider</div><div class="track"><i class="out" style="width:' + expPct + '%"></i></div>' +
+            '<div class="val out">−' + Fmt.money(mt.expense) + "</div></div>" +
+          (mt.adjust
+            ? '<div class="row"><div class="name">Düzeltme</div><div class="track"></div>' +
+              '<div class="val">' + Fmt.sgn(mt.adjust) + "</div></div>"
+            : "") +
+        "</div></div>" +
 
-      '<div class="dist"><h2>Gider dağılımı</h2>' + distHtml + '</div>' +
+      '<div class="dist">' +
+        "<h2>Gider dağılımı</h2>" +
+        '<div class="donut-row">' + donut +
+          '<div class="legend">' + (legend || "") + "</div>" +
+        "</div></div>" +
 
-      '<div class="sec-head"><div class="sec-title">En büyük giderler</div></div>' +
-      '<div class="top-exp">' + topHtml + '</div>';
+      (top
+        ? '<div class="top-ex"><h2>En büyük giderler</h2><div class="txs">' + top + "</div></div>"
+        : "");
   };
+
+  function renderYearSummary() {
+    var y = Number(S.year) || new Date().getFullYear();
+    var yt = yearTotals(y);
+    var netClass = yt.net > 0 ? "" : (yt.net < 0 ? " neg" : " zero");
+    var rowsHtml = "";
+    var running = yt.opening;
+    yt.months.forEach(function (r) {
+      running += r.net;
+      var empty = r.count === 0;
+      var netCls = r.net > 0 ? "pos" : (r.net < 0 ? "neg" : "");
+      rowsHtml += '<tr data-act="openYearMonth" data-month="' + esc(r.ym) + '"' +
+        (empty ? ' class="empty-row"' : "") + ">" +
+        "<td>" + esc(r.label) + "</td>" +
+        '<td class="num in">' + (r.income ? "+" + Fmt.money(r.income) : "—") + "</td>" +
+        '<td class="num out">' + (r.expense ? "−" + Fmt.money(r.expense) : "—") + "</td>" +
+        '<td class="num net ' + netCls + '">' + (r.count || r.adjust ? Fmt.sgn(r.net) : "—") + "</td>" +
+        '<td class="num">' + Fmt.money(running) + "</td>" +
+      "</tr>";
+    });
+    var netFoot = yt.net > 0 ? "pos" : (yt.net < 0 ? "neg" : "");
+    var table =
+      '<div class="month-nav">' +
+        '<button data-act="prevYear" aria-label="Önceki yıl">' + svg("chevL") + "</button>" +
+        '<div class="label" id="year-label">' + y + "</div>" +
+        '<button data-act="nextYear" aria-label="Sonraki yıl">' + svg("chevR") + "</button>" +
+      "</div>" +
+      '<div class="year-view">' +
+        '<div class="year-cards">' +
+          '<div class="y-card in"><div class="lab">Gelir</div><div class="val">+' + Fmt.money(yt.income) + "</div></div>" +
+          '<div class="y-card out"><div class="lab">Gider</div><div class="val">−' + Fmt.money(yt.expense) + "</div></div>" +
+          '<div class="y-card net' + netClass + '"><div class="lab">Net</div><div class="val">' + Fmt.sgn(yt.net) + "</div></div>" +
+        "</div>" +
+        '<div class="y-table-wrap"><h2>Aylık gelir gider</h2>' +
+          '<table class="y-table" id="year-table">' +
+            "<thead><tr><th>Ay</th><th>Gelir</th><th>Gider</th><th>Net</th><th>Bakiye</th></tr></thead>" +
+            "<tbody>" + rowsHtml + "</tbody>" +
+            "<tfoot><tr>" +
+              "<td>Toplam</td>" +
+              '<td class="num in">+' + Fmt.money(yt.income) + "</td>" +
+              '<td class="num out">−' + Fmt.money(yt.expense) + "</td>" +
+              '<td class="num net ' + netFoot + '">' + Fmt.sgn(yt.net) + "</td>" +
+              '<td class="num">' + Fmt.money(running) + "</td>" +
+            "</tr></tfoot>" +
+          "</table></div>" +
+        yearBarChart(yt) +
+        yearCatBreakdown(y, yt) +
+      "</div>";
+    return table;
+  }
+
+  function yearBarChart(yt) {
+    var max = 0;
+    yt.months.forEach(function (r) {
+      if (r.income > max) max = r.income;
+      if (r.expense > max) max = r.expense;
+    });
+    if (max <= 0) {
+      return '<div class="y-chart-wrap"><h2>Aylık karşılaştırma</h2>' +
+        '<div class="empty">Bu yıl hareket yok</div></div>';
+    }
+    var W = 390, H = 168, padL = 8, padR = 8, padT = 8, padB = 22;
+    var innerW = W - padL - padR, innerH = H - padT - padB;
+    var group = innerW / 12;
+    var barW = Math.max(5, Math.min(10, group * 0.28));
+    var gap = 2;
+    var bars = "";
+    yt.months.forEach(function (r, i) {
+      var cx = padL + group * i + group / 2;
+      var hIn = r.income ? (r.income / max) * innerH : 0;
+      var hOut = r.expense ? (r.expense / max) * innerH : 0;
+      var xIn = cx - barW - gap / 2;
+      var xOut = cx + gap / 2;
+      if (hIn > 0) bars += '<rect x="' + xIn.toFixed(1) + '" y="' + (padT + innerH - hIn).toFixed(1) +
+        '" width="' + barW.toFixed(1) + '" height="' + hIn.toFixed(1) + '" rx="2" fill="#0C9A6A"/>';
+      if (hOut > 0) bars += '<rect x="' + xOut.toFixed(1) + '" y="' + (padT + innerH - hOut).toFixed(1) +
+        '" width="' + barW.toFixed(1) + '" height="' + hOut.toFixed(1) + '" rx="2" fill="#D6453D"/>';
+      bars += '<text x="' + cx.toFixed(1) + '" y="' + (H - 6) +
+        '" text-anchor="middle" font-size="9" fill="currentColor" opacity="0.55">' + esc(r.short) + "</text>";
+    });
+    return '<div class="y-chart-wrap"><h2>Aylık karşılaştırma</h2>' +
+      '<svg class="y-chart" id="year-chart" viewBox="0 0 ' + W + " " + H + '" width="100%" height="' + H +
+      '" role="img" aria-label="Aylık gelir ve gider çubukları">' + bars + "</svg>" +
+      '<div class="y-chart-legend"><span class="in"><i></i>Gelir</span><span class="out"><i></i>Gider</span></div></div>';
+  }
+
+  function yearCatBreakdown(year, yt) {
+    var list = yearTx(year);
+    var byCat = {};
+    list.forEach(function (t) {
+      if (t.type !== "expense") return;
+      var k = t.categoryId || "_";
+      if (!byCat[k]) byCat[k] = 0;
+      byCat[k] += t.amount;
+    });
+    var parts = Object.keys(byCat).map(function (k) {
+      var c = k === "_" ? { name: "Kategorisiz", color: "#8E877C", icon: "tag", id: null } : catById(k);
+      return { id: k === "_" ? null : k, name: c ? c.name : "Kategorisiz", color: c ? c.color : "#8E877C", amount: byCat[k] };
+    }).sort(function (a, b) { return b.amount - a.amount; });
+    if (!parts.length) {
+      return '<div class="dist"><h2>Yıllık gider dağılımı</h2><div class="empty">Bu yıl gider yok</div></div>';
+    }
+    var total = yt.expense;
+    var acc = 0, circ = 2 * Math.PI * 36, donut = '<svg class="donut" viewBox="0 0 80 80" aria-hidden="true">';
+    parts.forEach(function (p) {
+      var len = total ? (p.amount / total) * circ : 0;
+      donut += '<circle cx="40" cy="40" r="36" fill="none" stroke="' + p.color + '" stroke-width="8" ' +
+        'stroke-dasharray="' + len + " " + (circ - len) + '" stroke-dashoffset="' + (-acc) + '"/>';
+      acc += len;
+    });
+    donut += "</svg>";
+    var legend = parts.map(function (p) {
+      var pct = total ? Math.round(p.amount / total * 100) : 0;
+      var open = p.id
+        ? ' type="button" data-act="openCatYear" data-id="' + esc(p.id) + '" data-year="' + year + '"'
+        : ' type="button" disabled';
+      return '<button class="leg"' + open + '>' +
+        '<div class="swatch" style="background:' + p.color + '"></div>' +
+        '<div class="name">' + esc(p.name) + " · " + pct + "%</div>" +
+        '<div class="amt">−' + Fmt.money(p.amount) + "</div></button>";
+    }).join("");
+    return '<div class="dist"><h2>Yıllık gider dağılımı</h2><div class="donut-row">' + donut +
+      '<div class="legend">' + legend + "</div></div></div>";
+  }
 
   /* ================= RENDER: AYARLAR ================= */
   function storagePersistHint() {
@@ -722,8 +954,9 @@
     S.adjustSign = 1;
   }
 
-  function openAddSheet(type) {
+  function openAddSheet(type, catId) {
     resetForm(type);
+    if (catId) S.formCat = catId;
     renderSheet();
     openSheet();
     setTimeout(function () {
@@ -757,16 +990,76 @@
     openSheet();
   }
 
+  function sheetViewport() {
+    var t = window.__hesapTestViewport;
+    if (t && typeof t.height === "number") {
+      return { height: Number(t.height), offsetTop: Number(t.offsetTop) || 0, width: Number(t.width) || window.innerWidth, test: true };
+    }
+    var vv = window.visualViewport;
+    if (vv) return { height: vv.height, offsetTop: vv.offsetTop || 0, width: vv.width, test: false };
+    return { height: window.innerHeight, offsetTop: 0, width: window.innerWidth, test: false };
+  }
+
+  function fitSheetToViewport() {
+    var el = SHT.el;
+    if (!el || !el.classList.contains("show")) return;
+    var vv = sheetViewport();
+    var full = window.innerHeight;
+    var bottomGap = Math.max(0, full - (vv.offsetTop + vv.height));
+    var maxH = Math.max(220, Math.min(vv.height, full * 0.92));
+    el.style.top = "auto";
+    el.style.bottom = Math.round(bottomGap) + "px";
+    el.style.height = Math.round(maxH) + "px";
+    el.style.maxHeight = Math.round(maxH) + "px";
+    var kb = bottomGap > 60 || vv.height < full - 80 || !!vv.test;
+    el.classList.toggle("kb-open", kb);
+    if (window.innerWidth >= 620) {
+      el.style.left = "50%";
+      el.style.right = "auto";
+      el.style.width = "min(480px, 100%)";
+      el.style.transform = "translate(-50%, 0)";
+    }
+  }
+
+  function clearSheetViewport() {
+    var el = SHT.el;
+    if (!el) return;
+    el.style.top = "";
+    el.style.bottom = "";
+    el.style.height = "";
+    el.style.maxHeight = "";
+    el.style.left = "";
+    el.style.right = "";
+    el.style.width = "";
+    el.style.transform = "";
+    el.classList.remove("kb-open");
+  }
+
+  function hookViewport() {
+    if (hookViewport._on) return;
+    hookViewport._on = true;
+    function on() { fitSheetToViewport(); }
+    window.addEventListener("resize", on);
+    window.addEventListener("hesap-vv-test", on);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", on);
+      window.visualViewport.addEventListener("scroll", on);
+    }
+  }
+
   function openSheet() {
+    hookViewport();
     $("#backdrop").classList.add("show");
     SHT.el.classList.add("show");
     document.body.style.overflow = "hidden";
+    fitSheetToViewport();
   }
   function closeSheet() {
     $("#backdrop").classList.remove("show");
     SHT.el.classList.remove("show");
     document.body.style.overflow = "";
     formError("");
+    clearSheetViewport();
   }
 
   function formError(msg) {
@@ -790,16 +1083,19 @@
     if (isAdjust) {
       head = isEdit ? "Düzeltmeyi düzenle" : "Bakiye düzeltmesi";
       sub = "Kategoriye yazılmaz, toplam bakiyeyi " + (S.adjustSign < 0 ? "azaltır" : "artırır") + ".";
-      mid = '<div class="amount-field' + (S.adjustSign < 0 ? "" : " income") + '">' +
-        '<input id="amount-input" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00" value="' + esc(amountVal) + '" aria-label="Tutar">' +
-        '<div class="ccy">Türk Lirası</div></div>' +
-        '<div class="field-label">Not</div>' +
-        '<div class="input-row">' + svg("note") +
-          '<input id="note-input" type="text" maxlength="120" autocomplete="off" placeholder="İsteğe bağlı" value="' + esc(t ? t.note : "") + '"></div>' +
-        '<div class="field-label">Tarih</div>' +
-        '<div class="input-row date-row">' + svg("cal") +
-          '<div class="val" id="date-label">' + esc(Fmt.fullDate(S.formDate)) + '</div>' +
-          '<input id="date-input" type="date" value="' + esc(S.formDate) + '" aria-label="Tarih"></div>';
+      mid = {
+        pin: '<div class="amount-field' + (S.adjustSign < 0 ? "" : " income") + '">' +
+          '<input id="amount-input" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00" value="' + esc(amountVal) + '" aria-label="Tutar">' +
+          '<div class="ccy">Türk Lirası</div></div>',
+        scroll:
+          '<div class="field-label">Not</div>' +
+          '<div class="input-row">' + svg("note") +
+            '<input id="note-input" type="text" maxlength="120" autocomplete="off" placeholder="İsteğe bağlı" value="' + esc(t ? t.note : "") + '"></div>' +
+          '<div class="field-label">Tarih</div>' +
+          '<div class="input-row date-row">' + svg("cal") +
+            '<div class="val" id="date-label">' + esc(Fmt.fullDate(S.formDate)) + '</div>' +
+            '<input id="date-input" type="date" value="' + esc(S.formDate) + '" aria-label="Tarih"></div>'
+      };
     } else {
       head = isEdit ? "Hareketi düzenle" : "Hareket ekle";
       sub = "";
@@ -810,27 +1106,36 @@
         '</div>';
 
       var picks = S.categories.slice().sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); })
+        .filter(function (c) {
+          if (S.formCat === c.id) return true;
+          var k = catKindOf(c);
+          if (isInc) return k !== "expense";
+          return k !== "income";
+        })
         .map(function (c) {
-          return '<button class="pick' + (S.formCat === c.id ? " on" : "") + '" data-pick="' + esc(c.id) + '" style="' + catStyle(c) + '">' +
+          return '<button class="chip-pick' + (S.formCat === c.id ? " on" : "") + '" data-pick="' + esc(c.id) + '" style="' + catStyle(c) + '">' +
             '<div class="dot">' + svg(c.icon) + '</div><span>' + esc(c.name) + '</span></button>';
         }).join("");
       if (!picks) {
-        picks = '<div class="empty" style="grid-column:1/-1"><strong>Kategori yok</strong>Önce Ayarlar → Kategoriler\'den ekle.</div>';
+        picks = '<div class="empty">Gösterilecek kategori yok</div>';
       }
 
-      mid = seg +
-        '<div class="amount-field' + (isInc ? " income" : "") + '">' +
-        '<input id="amount-input" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00" value="' + esc(amountVal) + '" aria-label="Tutar">' +
-        '<div class="ccy">Türk Lirası</div></div>' +
-        '<div class="field-label">Kategori</div>' +
-        '<div class="cat-pick">' + picks + '</div>' +
-        '<div class="field-label">Not</div>' +
-        '<div class="input-row">' + svg("note") +
-          '<input id="note-input" type="text" maxlength="120" autocomplete="off" placeholder="İsteğe bağlı" value="' + esc(t ? t.note : "") + '"></div>' +
-        '<div class="field-label">Tarih</div>' +
-        '<div class="input-row date-row">' + svg("cal") +
-          '<div class="val" id="date-label">' + esc(Fmt.fullDate(S.formDate)) + '</div>' +
-          '<input id="date-input" type="date" value="' + esc(S.formDate) + '" aria-label="Tarih"></div>';
+      mid = {
+        pin: seg +
+          '<div class="amount-field' + (isInc ? " income" : "") + '">' +
+          '<input id="amount-input" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00" value="' + esc(amountVal) + '" aria-label="Tutar">' +
+          '<div class="ccy">Türk Lirası</div></div>' +
+          '<div class="field-label">Kategori</div>' +
+          '<div class="cat-chips" id="cat-chips">' + picks + '</div>',
+        scroll:
+          '<div class="field-label">Not</div>' +
+          '<div class="input-row">' + svg("note") +
+            '<input id="note-input" type="text" maxlength="120" autocomplete="off" placeholder="İsteğe bağlı" value="' + esc(t ? t.note : "") + '"></div>' +
+          '<div class="field-label">Tarih</div>' +
+          '<div class="input-row date-row">' + svg("cal") +
+            '<div class="val" id="date-label">' + esc(Fmt.fullDate(S.formDate)) + '</div>' +
+            '<input id="date-input" type="date" value="' + esc(S.formDate) + '" aria-label="Tarih"></div>'
+      };
     }
 
     var actions = isEdit
@@ -839,13 +1144,19 @@
       : '<button class="save-btn" data-act="save">Kaydet</button>' +
         (isAdjust ? '' : '<button class="ghost-btn" data-act="saveNext">Kaydet ve devam et</button>');
 
+    var pinMid = (mid && mid.pin) ? mid.pin : (typeof mid === "string" ? mid : "");
+    var scrollMid = (mid && mid.scroll) ? mid.scroll : "";
     SHT.body.innerHTML =
-      '<div class="sheet-title">' + esc(head) + '</div>' +
-      (sub ? '<div class="sheet-sub">' + esc(sub) + '</div>' : '') +
-      '<div class="sheet-scroll">' + mid +
+      '<div class="sheet-pin">' +
+        '<div class="sheet-title">' + esc(head) + '</div>' +
+        (sub ? '<div class="sheet-sub">' + esc(sub) + '</div>' : '') +
+        pinMid +
+      '</div>' +
+      '<div class="sheet-scroll">' + scrollMid +
         '<div class="form-error" id="form-error"></div>' +
         actions +
       '</div>';
+    requestAnimationFrame(fitSheetToViewport);
 
     var inp = $("#amount-input");
     if (inp) {
@@ -984,8 +1295,8 @@
   function openCatSheet(catId) {
     var c = catId ? catById(catId) : null;
     catForm = c
-      ? { id: c.id, name: c.name, color: c.color, icon: c.icon }
-      : { id: null, name: "", color: PALETTE[Math.floor(Math.random() * PALETTE.length)], icon: "tag" };
+      ? { id: c.id, name: c.name, color: c.color, icon: c.icon, kind: catKindOf(c) }
+      : { id: null, name: "", color: PALETTE[Math.floor(Math.random() * PALETTE.length)], icon: "tag", kind: "both" };
     renderCatSheet();
     openSheet();
     setTimeout(function () {
@@ -1014,6 +1325,12 @@
         '<div class="swatches">' + sw + '</div>' +
         '<div class="field-label">İkon</div>' +
         '<div class="icon-grid">' + ic + '</div>' +
+        '<div class="field-label">Tür</div>' +
+        '<div class="seg kind-seg">' +
+          '<button type="button" data-kind="both" class="' + (catForm.kind === "both" ? "on" : "") + '">İkisi</button>' +
+          '<button type="button" data-kind="income" class="' + (catForm.kind === "income" ? "on income" : "") + '">Gelir</button>' +
+          '<button type="button" data-kind="expense" class="' + (catForm.kind === "expense" ? "on" : "") + '">Gider</button>' +
+        '</div>' +
         '<div class="form-error" id="form-error"></div>' +
         '<button class="save-btn" data-act="saveCat">Kaydet</button>' +
         (isEdit ? '<button class="danger-btn" data-act="delCat" data-id="' + esc(catForm.id) + '">Kategoriyi sil</button>' : '') +
@@ -1033,8 +1350,19 @@
         b.classList.add("on");
       });
     });
+    $$("[data-kind]", SHT.body).forEach(function (b) {
+      b.addEventListener("click", function () {
+        var k = b.getAttribute("data-kind");
+        catForm.kind = (k === "income" || k === "expense") ? k : "both";
+        $$("[data-kind]", SHT.body).forEach(function (x) {
+          x.classList.toggle("on", x === b);
+          x.classList.toggle("income", x === b && catForm.kind === "income");
+        });
+      });
+    });
     var n = $("#cat-name");
     if (n) n.addEventListener("input", function () { formError(""); });
+    requestAnimationFrame(fitSheetToViewport);
   }
 
   function saveCat() {
@@ -1042,23 +1370,23 @@
     var name = (nameEl ? nameEl.value : "").trim();
     if (!name) { formError("Kategori adı boş olamaz."); if (nameEl) nameEl.focus(); return; }
     var t = now();
+    var kind = (catForm.kind === "income" || catForm.kind === "expense") ? catForm.kind : "both";
     var rec;
     if (catForm.id) {
       var old = catById(catForm.id);
       if (!old) { formError("Kategori bulunamadı."); return; }
       rec = {
-        id: old.id, name: name, color: catForm.color, icon: catForm.icon,
+        id: old.id, name: name, color: catForm.color, icon: catForm.icon, kind: kind,
         sortOrder: old.sortOrder || 0, createdAt: old.createdAt, updatedAt: t
       };
     } else {
       var maxOrder = S.categories.reduce(function (m, c) { return Math.max(m, c.sortOrder || 0); }, -1);
-      rec = { id: uid(), name: name, color: catForm.color, icon: catForm.icon, sortOrder: maxOrder + 1, createdAt: t, updatedAt: t };
+      rec = { id: uid(), name: name, color: catForm.color, icon: catForm.icon, kind: kind, sortOrder: maxOrder + 1, createdAt: t, updatedAt: t };
     }
     DB.putCategory(rec).then(function (ok) {
       if (!ok) { formError("Kategori doğrulanamadı, tekrar dene."); return; }
       return loadData().then(function () {
         closeSheet();
-        if (S.view !== "manage" && S.view !== "cat") S.view = "manage";
         render();
         toast(catForm.id ? "Kategori güncellendi" : "Kategori eklendi");
       });
@@ -1069,30 +1397,326 @@
     var c = catById(id);
     if (!c) return;
     var n = catCount(id);
-    var body = n > 0
-      ? '“' + esc(c.name) + '” kategorisinde <strong>' + n + ' hareket</strong> var. Kategoriyle birlikte bu hareketler de silinecek. Bu işlem geri alınamaz.'
-      : '“' + esc(c.name) + '” kategorisi silinsin mi?';
-    confirmDialog("Kategoriyi sil", body, { okText: n > 0 ? "Hepsini sil" : "Sil" }).then(function (ok) {
-      if (!ok) return;
-      var when = now();
-      var tombs = S.transactions.filter(function (x) { return x.categoryId === id; }).map(function (x) {
-        var o = Object.assign({}, x);
-        o.deleted = true;
-        o.updatedAt = when;
-        return o;
+    if (n <= 0) {
+      confirmDialog("Kategoriyi sil", "“" + esc(c.name) + "” kategorisi silinsin mi?", { okText: "Sil" }).then(function (ok) {
+        if (ok) tombstoneCategory(id, null);
       });
-      Promise.all(tombs.map(function (x) { return DB.putTransaction(x); })).then(function () {
-        return DB.deleteCategory(id);
-      }).then(function () {
-        return loadData();
-      }).then(function () {
-        closeSheet();
-        if (S.view === "cat" && S.catId === id) S.view = "home";
-        if (S.view !== "manage" && S.view !== "home" && S.view !== "summary") S.view = "manage";
-        render();
-        toast("Kategori silindi");
+      return;
+    }
+    openMoveCatSheet(c, n);
+  }
+
+  function openMoveCatSheet(c, n) {
+    S.moveCatId = c.id;
+    S.moveTarget = "";
+    var others = S.categories.filter(function (x) { return x.id !== c.id; });
+    var opts = '<button type="button" class="move-opt on" data-move="" id="move-none">Kategorisiz</button>' +
+      others.map(function (x) {
+        return '<button type="button" class="move-opt" data-move="' + esc(x.id) + '" style="' + catStyle(x) + '">' +
+          '<div class="dot" style="width:28px;height:28px;border-radius:9px;display:grid;place-items:center;background:var(--cat-soft);color:var(--cat)">' +
+          svg(x.icon) + '</div><span>' + esc(x.name) + "</span></button>";
+      }).join("");
+    SHT.body.innerHTML =
+      '<div class="sheet-pin"><div class="sheet-title">Kategoriyi sil</div>' +
+        '<div class="sheet-sub">“' + esc(c.name) + "” içindeki <strong>" + n +
+        " hareket</strong> silinmez. Nereye taşınsın?</div></div>" +
+      '<div class="sheet-scroll">' +
+        '<div class="move-list" id="move-list">' + opts + "</div>" +
+        '<button class="save-btn" data-act="confirmMoveCat">Taşı ve sil</button>' +
+        '<button class="ghost-btn" data-act="cancel">Vazgeç</button>' +
+      "</div>";
+    openSheet();
+    $$("[data-move]", SHT.body).forEach(function (b) {
+      b.addEventListener("click", function () {
+        S.moveTarget = b.getAttribute("data-move") || "";
+        $$("[data-move]", SHT.body).forEach(function (x) { x.classList.remove("on"); });
+        b.classList.add("on");
       });
     });
+    requestAnimationFrame(fitSheetToViewport);
+  }
+
+  function tombstoneCategory(id, moveTo) {
+    var when = now();
+    var c = catById(id);
+    if (!c) return Promise.resolve();
+    var moved = S.transactions.filter(function (x) { return x.categoryId === id; }).map(function (x) {
+      var o = Object.assign({}, x);
+      o.categoryId = moveTo || null;
+      o.updatedAt = when;
+      return o;
+    });
+    var tomb = Object.assign({}, c);
+    tomb.deleted = true;
+    tomb.updatedAt = when;
+    return Promise.all(moved.map(function (x) { return DB.putTransaction(x); })).then(function () {
+      return DB.putCategory(tomb);
+    }).then(function () {
+      return loadData();
+    }).then(function () {
+      closeSheet();
+      if (S.view === "cat" && S.catId === id) { S.view = "home"; S.catId = null; }
+      render();
+      toast(moved.length ? "Kategori silindi, hareketler taşındı" : "Kategori silindi");
+    });
+  }
+
+  /* ================= HATIRLATMA FORMU ================= */
+  var remForm = { id: null, type: "pay", amount: 0, categoryId: null, date: "", repeat: "", note: "" };
+
+  function addMonthsYMD(ymd, n) {
+    var p = String(ymd).split("-");
+    var y = Number(p[0]), m = Number(p[1]) + n, d = Number(p[2]);
+    while (m > 12) { y += 1; m -= 12; }
+    while (m < 1) { y -= 1; m += 12; }
+    var last = new Date(y, m, 0).getDate();
+    if (d > last) d = last;
+    return y + "-" + ("0" + m).slice(-2) + "-" + ("0" + d).slice(-2);
+  }
+
+  function remById(id) {
+    for (var i = 0; i < (S.reminders || []).length; i++) if (S.reminders[i].id === id) return S.reminders[i];
+    return null;
+  }
+
+  function openReminderSheet(id) {
+    var r = id ? remById(id) : null;
+    remForm = r
+      ? { id: r.id, type: r.type === "receive" ? "receive" : "pay", amount: r.amount, categoryId: r.categoryId || null, date: r.date, repeat: r.repeat || "", note: r.note || "" }
+      : { id: null, type: "pay", amount: 0, categoryId: null, date: Fmt.todayYMD(), repeat: "", note: "" };
+    renderReminderSheet();
+    openSheet();
+    setTimeout(function () {
+      var inp = $("#rem-amount");
+      if (inp) inp.focus();
+    }, 320);
+  }
+
+  function renderReminderSheet() {
+    var isEdit = !!remForm.id;
+    var amountVal = remForm.amount ? Fmt.money(remForm.amount) : "";
+    var picks = S.categories.slice().sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); })
+      .map(function (c) {
+        return '<button class="chip-pick' + (remForm.categoryId === c.id ? " on" : "") + '" data-rempick="' + esc(c.id) + '" style="' + catStyle(c) + '">' +
+          '<div class="dot">' + svg(c.icon) + '</div><span>' + esc(c.name) + '</span></button>';
+      }).join("");
+    SHT.body.innerHTML =
+      '<div class="sheet-pin">' +
+        '<div class="sheet-title">' + (isEdit ? "Hatırlatmayı düzenle" : "Yeni hatırlatma") + '</div>' +
+        '<div class="seg">' +
+          '<button type="button" data-remtype="pay" class="' + (remForm.type !== "receive" ? "on" : "") + '">Ödeme yap</button>' +
+          '<button type="button" data-remtype="receive" class="' + (remForm.type === "receive" ? "on income" : "") + '">Ödeme al</button>' +
+        '</div>' +
+        '<div class="amount-field' + (remForm.type === "receive" ? " income" : "") + '">' +
+          '<input id="rem-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00" value="' + esc(amountVal) + '" aria-label="Tutar">' +
+          '<div class="ccy">Türk Lirası</div></div>' +
+        '<div class="field-label">Kategori</div>' +
+        '<div class="cat-chips">' + (picks || '<div class="empty">Kategori yok</div>') + '</div>' +
+      '</div>' +
+      '<div class="sheet-scroll">' +
+        '<div class="field-label">Tarih</div>' +
+        '<div class="input-row date-row">' + svg("cal") +
+          '<div class="val" id="rem-date-label">' + esc(Fmt.fullDate(remForm.date)) + '</div>' +
+          '<input id="rem-date" type="date" value="' + esc(remForm.date) + '" aria-label="Tarih"></div>' +
+        '<div class="field-label">Tekrar</div>' +
+        '<div class="seg">' +
+          '<button type="button" data-remrepeat="" class="' + (!remForm.repeat ? "on" : "") + '">Yok</button>' +
+          '<button type="button" data-remrepeat="monthly" class="' + (remForm.repeat === "monthly" ? "on" : "") + '">Her ay</button>' +
+        '</div>' +
+        '<div class="field-label">Not</div>' +
+        '<div class="input-row">' + svg("note") +
+          '<input id="rem-note" type="text" maxlength="120" autocomplete="off" placeholder="İsteğe bağlı" value="' + esc(remForm.note) + '"></div>' +
+        '<div class="form-error" id="form-error"></div>' +
+        '<button class="save-btn" data-act="saveReminder">Kaydet</button>' +
+        (isEdit
+          ? '<button class="ghost-btn" data-act="remIcs" data-id="' + esc(remForm.id) + '">Takvime ekle</button>' +
+            '<button class="danger-btn" data-act="delReminder" data-id="' + esc(remForm.id) + '">Sil</button>'
+          : "") +
+      '</div>';
+    var inp = $("#rem-amount");
+    if (inp) {
+      inp.addEventListener("input", function () {
+        var caretAtEnd = inp.selectionStart === inp.value.length;
+        var v = Fmt.liveAmount(inp.value);
+        inp.value = v;
+        if (caretAtEnd) { try { inp.setSelectionRange(v.length, v.length); } catch (e) {} }
+        formError("");
+      });
+    }
+    var di = $("#rem-date");
+    if (di) di.addEventListener("change", function () {
+      remForm.date = di.value || Fmt.todayYMD();
+      var lb = $("#rem-date-label");
+      if (lb) lb.textContent = Fmt.fullDate(remForm.date);
+    });
+    $$("[data-remtype]", SHT.body).forEach(function (b) {
+      b.addEventListener("click", function () {
+        remForm.type = b.getAttribute("data-remtype") === "receive" ? "receive" : "pay";
+        renderReminderSheet();
+      });
+    });
+    $$("[data-remrepeat]", SHT.body).forEach(function (b) {
+      b.addEventListener("click", function () {
+        remForm.repeat = b.getAttribute("data-remrepeat") === "monthly" ? "monthly" : "";
+        $$("[data-remrepeat]", SHT.body).forEach(function (x) { x.classList.toggle("on", x === b); });
+      });
+    });
+    $$("[data-rempick]", SHT.body).forEach(function (b) {
+      b.addEventListener("click", function () {
+        var id = b.getAttribute("data-rempick");
+        remForm.categoryId = (remForm.categoryId === id) ? null : id;
+        $$("[data-rempick]", SHT.body).forEach(function (x) {
+          x.classList.toggle("on", x.getAttribute("data-rempick") === remForm.categoryId);
+        });
+      });
+    });
+    requestAnimationFrame(fitSheetToViewport);
+  }
+
+  function saveReminder() {
+    var amtEl = $("#rem-amount");
+    var noteEl = $("#rem-note");
+    var dateEl = $("#rem-date");
+    var amount = Fmt.parseAmount(amtEl ? amtEl.value : "");
+    var date = (dateEl && dateEl.value) || remForm.date || Fmt.todayYMD();
+    var note = noteEl ? noteEl.value.trim() : (remForm.note || "");
+    if (amount <= 0) { formError("Tutar 0'dan büyük olmalı."); if (amtEl) amtEl.focus(); return; }
+    var t = now();
+    var rec;
+    if (remForm.id) {
+      var old = remById(remForm.id);
+      if (!old) { formError("Hatırlatma bulunamadı."); return; }
+      rec = Object.assign({}, old);
+      rec.type = remForm.type === "receive" ? "receive" : "pay";
+      rec.amount = amount;
+      rec.categoryId = remForm.categoryId || null;
+      rec.date = date;
+      rec.repeat = remForm.repeat === "monthly" ? "monthly" : null;
+      rec.note = note;
+      rec.updatedAt = t;
+    } else {
+      rec = {
+        id: uid(), type: remForm.type === "receive" ? "receive" : "pay", amount: amount,
+        categoryId: remForm.categoryId || null, date: date,
+        repeat: remForm.repeat === "monthly" ? "monthly" : null,
+        note: note, done: false, doneAt: null, lastDoneDate: null,
+        createdAt: t, updatedAt: t
+      };
+    }
+    DB.putReminder(rec).then(function (ok) {
+      if (!ok) { formError("Kaydedilemedi, tekrar dene."); return; }
+      return loadData().then(function () {
+        closeSheet();
+        render();
+        toast(remForm.id ? "Hatırlatma güncellendi" : "Hatırlatma eklendi");
+      });
+    });
+  }
+
+  function deleteReminder(id) {
+    var r = remById(id);
+    if (!r) return;
+    confirmDialog("Hatırlatmayı sil", "Bu hatırlatma silinsin mi?", { okText: "Sil" }).then(function (ok) {
+      if (!ok) return;
+      var tomb = Object.assign({}, r);
+      tomb.deleted = true;
+      tomb.updatedAt = now();
+      DB.putReminder(tomb).then(function () { return loadData(); }).then(function () {
+        closeSheet();
+        render();
+        toast("Hatırlatma silindi");
+      });
+    });
+  }
+
+  function completeReminder(id) {
+    var r = remById(id);
+    if (!r) return;
+    confirmDialog("Hareket olarak kaydet?",
+      "Bu hatırlatma bakiyeye işlensin mi?",
+      { okText: "Evet", cancelText: "Hayır", danger: false }).then(function (asTx) {
+      closeDialog();
+      var jobs = [];
+      var when = now();
+      if (asTx) {
+        var typ = r.type === "receive" ? "income" : "expense";
+        jobs.push(DB.putTransaction({
+          id: uid(), type: typ, amount: r.amount, categoryId: r.categoryId || null,
+          note: r.note || (r.type === "receive" ? "Ödeme alındı" : "Ödeme yapıldı"),
+          date: r.date || Fmt.todayYMD(), createdAt: when, updatedAt: when
+        }));
+      }
+      var rec = Object.assign({}, r);
+      rec.updatedAt = when;
+      rec.lastDoneDate = r.date;
+      if (r.repeat === "monthly") {
+        rec.date = addMonthsYMD(r.date, 1);
+        rec.done = false;
+        rec.doneAt = null;
+      } else {
+        rec.done = true;
+        rec.doneAt = when;
+      }
+      jobs.push(DB.putReminder(rec));
+      Promise.all(jobs).then(function () { return loadData(); }).then(function () {
+        render();
+        toast(asTx ? "Hareket kaydedildi" : (r.repeat === "monthly" ? "Sonraki aya alındı" : "Tamamlandı"));
+      });
+    });
+  }
+
+  function reminderIcs(r) {
+    var title = (r.type === "receive" ? "Ödeme al" : "Ödeme yap") + ": " + Fmt.money(r.amount) + " TL";
+    var cat = r.categoryId ? catById(r.categoryId) : null;
+    if (cat) title += " (" + cat.name + ")";
+    if (r.note) title += " — " + r.note;
+    function icsEsc(s) { return String(s || "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n"); }
+    var uid = "hesap-rem-" + r.id + "@hesap";
+    var stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    var day = String(r.date).replace(/-/g, "");
+    var start = day + "T090000";
+    var end = day + "T093000";
+    return [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//Hesap//TR",
+      "CALSCALE:GREGORIAN",
+      "BEGIN:VEVENT",
+      "UID:" + uid,
+      "DTSTAMP:" + stamp,
+      "DTSTART:" + start,
+      "DTEND:" + end,
+      "SUMMARY:" + icsEsc(title),
+      "DESCRIPTION:" + icsEsc(r.note || ""),
+      "BEGIN:VALARM",
+      "ACTION:DISPLAY",
+      "TRIGGER:-P1D",
+      "DESCRIPTION:" + icsEsc(title),
+      "END:VALARM",
+      "BEGIN:VALARM",
+      "ACTION:DISPLAY",
+      "TRIGGER:PT0S",
+      "DESCRIPTION:" + icsEsc(title),
+      "END:VALARM",
+      "END:VEVENT",
+      "END:VCALENDAR"
+    ].join("\r\n");
+  }
+
+  function addReminderToCalendar(id) {
+    var r = remById(id);
+    if (!r) return;
+    var ics = reminderIcs(r);
+    var blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "hesap-hatirlatma-" + String(r.date).replace(/-/g, "") + ".ics";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); if (a.parentNode) a.parentNode.removeChild(a); }, 2000);
+    toast("Takvim dosyası açıldı");
+    return ics;
   }
 
   /* ================= YEDEK ================= */
@@ -1103,8 +1727,20 @@
       appVersion: APP_VERSION,
       exportedAt: new Date().toISOString(),
       settings: { theme: S.settings.theme || "auto" },
-      categories: S.categories.map(function (c) {
-        return { id: c.id, name: c.name, color: c.color, icon: c.icon, sortOrder: c.sortOrder, createdAt: c.createdAt, updatedAt: c.updatedAt };
+      categories: S.categories.concat(S.catTombs || []).map(function (c) {
+        var o = { id: c.id, name: c.name, color: c.color, icon: c.icon, sortOrder: c.sortOrder, createdAt: c.createdAt, updatedAt: c.updatedAt, kind: catKindOf(c) };
+        if (c.deleted) o.deleted = true;
+        return o;
+      }),
+      reminders: (S.reminders || []).concat(S.remTombs || []).map(function (r) {
+        var o = {
+          id: r.id, type: r.type, amount: r.amount, categoryId: r.categoryId || null,
+          date: r.date, repeat: r.repeat || null, note: r.note || "",
+          done: !!r.done, doneAt: r.doneAt || null, lastDoneDate: r.lastDoneDate || null,
+          createdAt: r.createdAt, updatedAt: r.updatedAt
+        };
+        if (r.deleted) o.deleted = true;
+        return o;
       }),
       transactions: S.transactions.concat(S.tombstones || []).map(function (t) {
         var o = {
@@ -1247,14 +1883,17 @@
     var cats = [], txs = [], bad = 0, t = now();
     data.categories.forEach(function (c) {
       if (!c || !c.id || typeof c.name !== "string") { bad++; return; }
-      cats.push({
+      var recC = {
         id: String(c.id), name: String(c.name).slice(0, 60),
         color: /^#[0-9a-fA-F]{6}$/.test(c.color || "") ? c.color : "#8E877C",
         icon: ICONS[c.icon] ? c.icon : "tag",
+        kind: (c.kind === "income" || c.kind === "expense") ? c.kind : "both",
         sortOrder: Number(c.sortOrder) || cats.length,
         createdAt: Number(c.createdAt) || t,
         updatedAt: Number(c.updatedAt) || t
-      });
+      };
+      if (c.deleted) recC.deleted = true;
+      cats.push(recC);
     });
     data.transactions.forEach(function (x) {
       if (!x || !x.id) { bad++; return; }
@@ -1290,13 +1929,34 @@
       if (x.type === "adjust") rec.adjustSign = x.adjustSign === -1 ? -1 : 1;
       txs.push(rec);
     });
+    var rems = [];
+    (Array.isArray(data.reminders) ? data.reminders : []).forEach(function (r) {
+      if (!r || !r.id) { bad++; return; }
+      var amt = Math.round(Math.abs(Number(r.amount))) || 0;
+      var recR = {
+        id: String(r.id),
+        type: r.type === "receive" ? "receive" : "pay",
+        amount: amt || 1,
+        categoryId: r.categoryId ? String(r.categoryId) : null,
+        date: /^\d{4}-\d{2}-\d{2}$/.test(String(r.date || "")) ? String(r.date) : "2000-01-01",
+        repeat: r.repeat === "monthly" ? "monthly" : null,
+        note: String(r.note || "").slice(0, 200),
+        done: !!r.done,
+        doneAt: r.doneAt ? Number(r.doneAt) : null,
+        lastDoneDate: r.lastDoneDate || null,
+        createdAt: Number(r.createdAt) || t,
+        updatedAt: Number(r.updatedAt) || t
+      };
+      if (r.deleted) recR.deleted = true;
+      rems.push(recR);
+    });
     var theme = (data.settings && ["auto", "light", "dark"].indexOf(data.settings.theme) >= 0) ? data.settings.theme : (S.settings.theme || "auto");
-    return { cats: cats, txs: txs, bad: bad, theme: theme };
+    return { cats: cats, txs: txs, rems: rems, bad: bad, theme: theme };
   }
 
   /* tüm veriyi değiştir, yeniden yükle, çiz */
-  function replaceData(cats, txs, theme) {
-    return DB.replaceAll(cats, txs, { theme: theme || S.settings.theme || "auto", schemaVersion: 1 }).then(function () {
+  function replaceData(cats, txs, theme, rems) {
+    return DB.replaceAll(cats, txs, { theme: theme || S.settings.theme || "auto", schemaVersion: 1 }, rems || []).then(function () {
       return loadData();
     }).then(function () {
       applyTheme();
@@ -1320,7 +1980,7 @@
       confirmDialog("Yedek yüklenemedi", n.error, { okText: "Tamam", danger: false }).then(closeDialog);
       return;
     }
-    var cats = n.cats, txs = n.txs, bad = n.bad;
+    var cats = n.cats, txs = n.txs, rems = n.rems || [], bad = n.bad;
 
     var msg = "Bu işlem mevcut <strong>" + S.categories.length + " kategori</strong> ve <strong>" +
       S.transactions.length + " hareket</strong> kaydının üzerine yazacak.<br><br>" +
@@ -1329,8 +1989,8 @@
 
     confirmDialog("Yedeği yükle", msg, { okText: "Üzerine yaz" }).then(function (ok) {
       if (!ok) return;
-      replaceData(cats, txs, n.theme).then(function () {
-        DB.log("YEDEK", "içe aktarıldı: " + cats.length + " kategori, " + txs.length + " hareket" + (bad ? ", " + bad + " atlandı" : ""));
+      replaceData(cats, txs, n.theme, rems).then(function () {
+        DB.log("YEDEK", "içe aktarıldı: " + cats.length + " kategori, " + txs.length + " hareket, " + rems.length + " hatırlatma" + (bad ? ", " + bad + " atlandı" : ""));
         toast("Yedek yüklendi");
       }).catch(function (e) {
         DB.log("YEDEK", "içe aktarma hatası: " + (e && e.message ? e.message : e));
@@ -1365,10 +2025,20 @@
 
   /* ================= VERİ YÜKLE ================= */
   function loadData() {
-    return Promise.all([DB.getAll(DB.ST_CAT), DB.getAll(DB.ST_TX), DB.getSettings()]).then(function (r) {
-      S.categories = r[0] || [];
+    return Promise.all([
+      DB.getAll(DB.ST_CAT),
+      DB.getAll(DB.ST_TX),
+      DB.getSettings(),
+      DB.getAll(DB.ST_REM).catch(function () { return []; })
+    ]).then(function (r) {
+      var allCats = r[0] || [];
+      S.catTombs = allCats.filter(function (x) { return !!(x && x.deleted); });
+      S.categories = allCats.filter(function (x) { return !(x && x.deleted); });
       S.tombstones = (r[1] || []).filter(function (x) { return !!(x && x.deleted); });
       S.transactions = (r[1] || []).filter(function (x) { return !(x && x.deleted); });
+      var allRems = r[3] || [];
+      S.remTombs = allRems.filter(function (x) { return !!(x && x.deleted); });
+      S.reminders = allRems.filter(function (x) { return !(x && x.deleted); });
       var st = r[2] || {};
       S.settings.theme = ["auto", "light", "dark"].indexOf(st.theme) >= 0 ? st.theme : "auto";
       if (st.lastBackupAt) S.settings.lastBackupAt = st.lastBackupAt;
@@ -1390,13 +2060,39 @@
       var act = t.getAttribute("data-act");
       if (act === "settings") { go("settings"); return; }
       if (act === "back") {
-        if (S.view === "cat" && S.catMonth) { go("summary"); return; }
+        if (S.view === "cat" && (S.catMonth || S.catYear)) { go("summary"); return; }
         go("home"); return;
       }
       if (act === "manage") { go("manage"); return; }
       if (act === "adjust") { openAdjustSheet(Number(t.getAttribute("data-sign"))); return; }
       if (act === "prevMonth") { S.month = Fmt.addMonths(S.month, -1); render(); return; }
       if (act === "nextMonth") { S.month = Fmt.addMonths(S.month, 1); render(); return; }
+      if (act === "prevYear") { S.year = (Number(S.year) || new Date().getFullYear()) - 1; render(); return; }
+      if (act === "nextYear") { S.year = (Number(S.year) || new Date().getFullYear()) + 1; render(); return; }
+      if (act === "sumMode") {
+        S.summaryMode = t.getAttribute("data-mode") === "year" ? "year" : "month";
+        render();
+        return;
+      }
+      if (act === "openYearMonth") {
+        S.month = t.getAttribute("data-month") || S.month;
+        S.summaryMode = "month";
+        go("summary");
+        return;
+      }
+      if (act === "openCatMonth") {
+        go("cat", { catId: t.getAttribute("data-id"), month: t.getAttribute("data-month") });
+        return;
+      }
+      if (act === "openCatYear") {
+        go("cat", { catId: t.getAttribute("data-id"), year: t.getAttribute("data-year") });
+        return;
+      }
+      if (act === "catAdd") {
+        ev.preventDefault();
+        openAddSheet(t.getAttribute("data-type"), t.getAttribute("data-cat"));
+        return;
+      }
       if (act === "save") { saveForm(false); return; }
       if (act === "saveNext") { saveForm(true); return; }
       if (act === "dedit") { deleteCurrentTx(); return; }
@@ -1404,6 +2100,13 @@
       if (act === "newCat") { openCatSheet(null); return; }
       if (act === "editCat") { openCatSheet(t.getAttribute("data-id")); return; }
       if (act === "delCat") { deleteCat(t.getAttribute("data-id")); return; }
+      if (act === "confirmMoveCat") { tombstoneCategory(S.moveCatId, S.moveTarget || null); return; }
+      if (act === "cancel") { closeSheet(); return; }
+      if (act === "newReminder") { openReminderSheet(null); return; }
+      if (act === "saveReminder") { saveReminder(); return; }
+      if (act === "remOpen") { ev.preventDefault(); completeReminder(t.getAttribute("data-id")); return; }
+      if (act === "remIcs") { ev.preventDefault(); ev.stopPropagation(); addReminderToCalendar(t.getAttribute("data-id")); return; }
+      if (act === "delReminder") { deleteReminder(t.getAttribute("data-id")); return; }
       if (act === "backup") { doBackup(); return; }
       if (act === "restore") { pickBackup(); return; }
       if (act === "debug") { openDebug(); return; }
@@ -1582,8 +2285,9 @@
       state: function () {
         return {
           settings: S.settings,
-          categories: S.categories,
+          categories: S.categories.concat(S.catTombs || []),
           transactions: S.transactions.concat(S.tombstones || []),
+          reminders: (S.reminders || []).concat(S.remTombs || []),
           view: S.view
         };
       },
@@ -1618,6 +2322,7 @@
       return checkStorageHealth();
     }).then(function () {
       DB.log("DEPO", "açılış · kategori:" + S.categories.length + " hareket:" + S.transactions.length +
+        " hatırlatma:" + (S.reminders || []).length +
         " persist:" + S.persist + " standalone:" + S.storage.standalone +
         " tema:" + (S.settings.theme || "auto") + " sürüm:" + APP_VERSION +
         " build:" + (S.settings.build || "—"));
@@ -1662,20 +2367,32 @@
 
   window.HesapDebug = {
     counts: function () {
-      return DB.getAll(DB.ST_TX).then(function (all) {
-        all = all || [];
-        return DB.getAll(DB.ST_CAT).then(function (cats) {
-          return {
-            categories: (cats || []).length,
-            transactions: all.filter(function (x) { return !x.deleted; }).length,
-            tombstones: all.filter(function (x) { return !!x.deleted; }).length
-          };
-        });
+      return Promise.all([
+        DB.getAll(DB.ST_TX),
+        DB.getAll(DB.ST_CAT),
+        DB.getAll(DB.ST_REM).catch(function () { return []; })
+      ]).then(function (r) {
+        var all = r[0] || [], cats = r[1] || [], rems = r[2] || [];
+        return {
+          categories: cats.filter(function (x) { return !x.deleted; }).length,
+          catTombs: cats.filter(function (x) { return !!x.deleted; }).length,
+          transactions: all.filter(function (x) { return !x.deleted; }).length,
+          tombstones: all.filter(function (x) { return !!x.deleted; }).length,
+          reminders: rems.filter(function (x) { return !x.deleted; }).length,
+          remTombs: rems.filter(function (x) { return !!x.deleted; }).length
+        };
       });
     },
     dump: buildBackup,
     drive: function () { return window.DriveSync ? DriveSync._state() : null; },
-    version: APP_VERSION
+    version: APP_VERSION,
+    yearTotals: yearTotals,
+    monthTotals: monthTotals,
+    reminderIcs: function (id) {
+      var r = remById(id);
+      return r ? reminderIcs(r) : null;
+    },
+    state: function () { return S; }
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

@@ -4,6 +4,8 @@ window.Fmt = (function () {
 
   var MONTHS = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
                 "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
+  var MONTHS_SHORT = ["Oca", "Şub", "Mar", "Nis", "May", "Haz",
+                      "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"];
 
   var nf;
   try {
@@ -67,6 +69,21 @@ window.Fmt = (function () {
 
   function ymOf(dateStr) { return String(dateStr || "").slice(0, 7); }
 
+  function yearOf(dateStr) {
+    var y = Number(String(dateStr || "").slice(0, 4));
+    return y || new Date().getFullYear();
+  }
+
+  /* "2026-04" — 0-11 ay indisi */
+  function monthIndex(ym) {
+    var m = Number(String(ym || "").split("-")[1] || 0);
+    return Math.max(1, Math.min(12, m)) - 1;
+  }
+
+  function ym(year, month) {
+    return year + "-" + pad2(month);
+  }
+
   /* "2026-11" + n ay */
   function addMonths(ym, delta) {
     var p = String(ym).split("-");
@@ -98,6 +115,7 @@ window.Fmt = (function () {
 
   return {
     MONTHS: MONTHS,
+    MONTHS_SHORT: MONTHS_SHORT,
     money: money,
     sgn: sgn,
     plainSgn: plainSgn,
@@ -108,6 +126,9 @@ window.Fmt = (function () {
     fullDate: fullDate,
     monthLabel: monthLabel,
     ymOf: ymOf,
+    yearOf: yearOf,
+    monthIndex: monthIndex,
+    ym: ym,
     addMonths: addMonths,
     liveAmount: liveAmount,
     parseAmount: parseAmount
