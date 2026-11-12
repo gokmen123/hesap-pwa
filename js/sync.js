@@ -1,10 +1,11 @@
-/* Hesap — Google Drive eşitleme (0.3.3)
+/* Hesap — Google Drive eşitleme (0.3.4)
    Telefondaki IndexedDB her zaman asıl kopyadır (yazmalar önce buraya).
    Açılışta, bağlanınca ve internet gelince: çevrimiçiyken Drive'dan
    Hesap/hesap_yedek.json ÖNCE çekilir (soru yok); üzerine yazmadan önce
    son 3 yerel güvenlik kopyası alınır. Sonra yerel değişiklikler otomatik
    (gecikmeli) Drive'a gönderilir. Çevrimdışı telefon kopyasıyla sessiz çalışır.
    Çakışma: kayıt id + updatedAt ile birleştirilir, kayıt sessizce kaybolmaz;
+   silinen kayıtlar tombstone (deleted) olarak durur, birleştirmede geri gelmez.
    birleşemezse (bozuk dosya vb.) ancak o zaman soru sayfası çıkar.
    Otomatik eşitleme varsayılan açık.
    Uygulama dosyası görünmüyorsa bir kez ek kapsam (`drive`) istenir
@@ -443,7 +444,7 @@ window.DriveSync = (function () {
       return [c.id, c.name, c.color, c.icon, c.sortOrder || 0];
     }).sort(function (a, b) { return a[0] < b[0] ? -1 : 1; });
     var txs = s.transactions.map(function (t) {
-      return [t.id, t.type, t.amount, t.categoryId || null, t.note || "", t.date, t.type === "adjust" ? (t.adjustSign === -1 ? -1 : 1) : 0];
+      return [t.id, t.type, t.amount, t.categoryId || null, t.note || "", t.date, t.type === "adjust" ? (t.adjustSign === -1 ? -1 : 1) : 0, t.deleted ? 1 : 0];
     }).sort(function (a, b) { return a[0] < b[0] ? -1 : 1; });
     return JSON.stringify([cats, txs]);
   }
@@ -464,9 +465,15 @@ window.DriveSync = (function () {
     return Promise.resolve(fnv(txt, 2166136261) + fnv(txt, 33554467));
   }
 
+  function isTomb(t) { return !!(t && t.deleted); }
+  function liveList(list) {
+    return (list || []).filter(function (t) { return !isTomb(t); });
+  }
+
   function summaryOf(s) {
-    var o = { tx: s.transactions.length, cats: s.categories.length, balance: 0, lastDate: null };
-    s.transactions.forEach(function (t) {
+    var txs = liveList(s.transactions);
+    var o = { tx: txs.length, cats: s.categories.length, balance: 0, lastDate: null };
+    txs.forEach(function (t) {
       if (t.type === "income") o.balance += t.amount;
       else if (t.type === "expense") o.balance -= t.amount;
       else if (t.type === "adjust") o.balance += (t.adjustSign === -1 ? -t.amount : t.amount);
@@ -475,7 +482,7 @@ window.DriveSync = (function () {
     return o;
   }
 
-  function localEmpty() { return A.state().transactions.length === 0; }
+  function localEmpty() { return liveList(A.state().transactions).length === 0; }
 
   function deviceName() {
     var ua = navigator.userAgent || "";
@@ -532,7 +539,8 @@ window.DriveSync = (function () {
   function sameTx(a, b) {
     return a.type === b.type && Number(a.amount) === Number(b.amount) &&
       (a.categoryId || null) === (b.categoryId || null) && (a.note || "") === (b.note || "") &&
-      a.date === b.date && (a.type !== "adjust" || (a.adjustSign === -1 ? -1 : 1) === (b.adjustSign === -1 ? -1 : 1));
+      a.date === b.date && (a.type !== "adjust" || (a.adjustSign === -1 ? -1 : 1) === (b.adjustSign === -1 ? -1 : 1)) &&
+      !!a.deleted === !!b.deleted;
   }
   function pickNewer(a, b) {
     var at = Number(a.updatedAt || 0), bt = Number(b.updatedAt || 0);
@@ -564,11 +572,19 @@ window.DriveSync = (function () {
     (local.transactions || []).forEach(function (t) { txs[t.id] = t; });
     (remoteNorm.txs || []).forEach(function (t) {
       if (!txs[t.id]) { txs[t.id] = t; return; }
-      if (sameTx(txs[t.id], t)) {
-        if (Number(t.updatedAt || 0) > Number(txs[t.id].updatedAt || 0)) txs[t.id] = t;
+      var a = txs[t.id];
+      if (isTomb(a) || isTomb(t)) {
+        var newer = pickNewer(a, t);
+        if (newer) { txs[t.id] = newer; return; }
+        /* aynı an: silme kazansın, kayıt geri gelmesin */
+        txs[t.id] = isTomb(a) ? a : t;
         return;
       }
-      var n = pickNewer(txs[t.id], t);
+      if (sameTx(a, t)) {
+        if (Number(t.updatedAt || 0) > Number(a.updatedAt || 0)) txs[t.id] = t;
+        return;
+      }
+      var n = pickNewer(a, t);
       if (n) { txs[t.id] = n; return; }
       var copy = {};
       Object.keys(t).forEach(function (k) { copy[k] = t[k]; });
@@ -725,12 +741,12 @@ window.DriveSync = (function () {
       st.rev = got.rev; st.hash = h; st.syncedAt = Date.now(); st.remoteUpdatedAt = got.updatedAt; st.fileId = got.fileId;
       delete got.data; remote = got;
       pending = null; status = "ok"; lastError = "";
-      log("Drive'dan alındı · rev " + got.rev + " · " + norm.txs.length + " hareket" + (norm.bad ? " · " + norm.bad + " atlandı" : "") + (opts.reason ? " (" + opts.reason + ")" : ""));
+      log("Drive'dan alındı · rev " + got.rev + " · " + liveList(norm.txs).length + " hareket" + (norm.bad ? " · " + norm.bad + " atlandı" : "") + (opts.reason ? " (" + opts.reason + ")" : ""));
       return saveSt();
     }).then(function () {
       busy = false; closeSheet(); paint();
-      if (!opts.silent || wasEmpty) A.toast("Drive'dan " + norm.txs.length + " hareket yüklendi");
-      return true;
+      if (!opts.silent || wasEmpty) A.toast("Drive'dan " + liveList(norm.txs).length + " hareket yüklendi");
+      return safetyCopy("Drive'dan alındı").then(function () { return true; });
     }).catch(function (e) {
       suppressLocal = false;
       busy = false; sheetBusy(false);
@@ -794,6 +810,19 @@ window.DriveSync = (function () {
   }
 
   /* app.js her veri yüklemesinden sonra çağırır */
+  function scheduleAutoPush(delay) {
+    if (!configured() || (cfg && cfg.auto === false)) return;
+    if (!hasToken() || navigator.onLine === false) return;
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(function () {
+      if (busy) { scheduleAutoPush(800); return; }
+      if (localDirty() || (st.rev == null && !localEmpty())) {
+        log("otomatik yedek");
+        push(false, { silent: true });
+      }
+    }, delay == null ? AUTO_DELAY_MS : delay);
+  }
+
   function onLocalChange() {
     if (!configured() || suppressLocal || !A) return;
     refreshLocalHash().then(function () {
@@ -807,15 +836,7 @@ window.DriveSync = (function () {
         shouldPush = localDirty();
         paint();
       }
-      if (shouldPush && cfg.auto !== false && hasToken() && navigator.onLine !== false) {
-        clearTimeout(autoTimer);
-        autoTimer = setTimeout(function () {
-          if (!busy && (localDirty() || (st.rev == null && !localEmpty()))) {
-            log("otomatik yedek");
-            push(false, { silent: true });
-          }
-        }, AUTO_DELAY_MS);
-      }
+      if (shouldPush) scheduleAutoPush();
     });
   }
 
@@ -1020,9 +1041,11 @@ window.DriveSync = (function () {
         '<button data-drv="pullNow">' + ic("down") + '<span>Drive\'dan çek</span></button>' +
         '<button data-drv="test">' + ic("check") + '<span>Kontrol et</span></button>' +
       '</div>' +
-      (cfg.adoptDenied
-        ? '<button class="set-row" data-drv="adoptRetry"><div><div class="k">Drive\'daki yedeği al</div><div class="d">Kendi Drive\'ındaki Hesap yedeğini uygulamaya almak için Google izni gerekir.</div></div><div class="v">›</div></button>'
-        : '') +
+      '<button class="set-row" data-drv="adoptRetry"><div><div class="k">Drive\'daki yedeği al</div><div class="d">' +
+        (cfg.adoptDenied
+          ? 'Kendi Drive\'ındaki Hesap yedeğini uygulamaya almak için Google izni gerekir.'
+          : 'Drive\'daki Hesap yedeğini telefona yükler. Mevcut veri önce güvenlik kopyasına alınır.') +
+        '</div></div><div class="v">›</div></button>' +
       '<div class="set-row">' +
         '<div><div class="k">Otomatik eşitle</div><div class="d">Açılışta Drive\'dan alır, değişiklikleri sormadan geri gönderir. Çevrimdışı telefonda çalışır.</div></div>' +
         '<button class="drv-switch' + (cfg.auto ? " on" : "") + '" data-drv="auto" role="switch" aria-checked="' + (cfg.auto ? "true" : "false") + '"><i></i></button>' +
@@ -1147,7 +1170,14 @@ window.DriveSync = (function () {
     else if (a === "test") testNow();
     else if (a === "adoptRetry") {
       cfg.adoptDenied = false;
-      saveCfg().then(function () { startAuth("adopt", false, ADOPT_SCOPE); });
+      if (!cfg.wideScope && !(st && st.fileId)) {
+        saveCfg().then(function () { startAuth("adopt", false, ADOPT_SCOPE); });
+      } else {
+        saveCfg().then(function () {
+          A.confirm("Drive'daki yedeği al", "Telefondaki kayıtlar Drive'dakiyle değişecek. Mevcut veri önce <strong>güvenlik kopyasına</strong> alınır.",
+            { okText: "Al", danger: false }).then(function (ok) { if (ok) pull(); });
+        });
+      }
     }
     else if (a === "auto") {
       cfg.auto = !cfg.auto;

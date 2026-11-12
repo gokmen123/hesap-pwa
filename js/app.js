@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "0.3.3";
+  var APP_VERSION = "0.3.4";
 
   /* ================= İKONLAR (yerleşik SVG kümesi) ================= */
   var ICONS = {
@@ -963,7 +963,12 @@
     confirmDialog("Hareketi sil", "Bu hareket silinsin mi? Bakiyeler buna göre güncellenir.", { okText: "Sil" })
       .then(function (ok) {
         if (!ok) return;
-        DB.deleteTransaction(id).then(function () {
+        var oldRec = null;
+        for (var i = 0; i < S.transactions.length; i++) if (S.transactions[i].id === id) oldRec = S.transactions[i];
+        var rec = oldRec ? Object.assign({}, oldRec) : { id: id };
+        rec.deleted = true;
+        rec.updatedAt = now();
+        DB.putTransaction(rec).then(function () {
           return loadData();
         }).then(function () {
           closeSheet();
@@ -1069,7 +1074,14 @@
       : '“' + esc(c.name) + '” kategorisi silinsin mi?';
     confirmDialog("Kategoriyi sil", body, { okText: n > 0 ? "Hepsini sil" : "Sil" }).then(function (ok) {
       if (!ok) return;
-      DB.deleteTransactionsByCategory(id).then(function () {
+      var when = now();
+      var tombs = S.transactions.filter(function (x) { return x.categoryId === id; }).map(function (x) {
+        var o = Object.assign({}, x);
+        o.deleted = true;
+        o.updatedAt = when;
+        return o;
+      });
+      Promise.all(tombs.map(function (x) { return DB.putTransaction(x); })).then(function () {
         return DB.deleteCategory(id);
       }).then(function () {
         return loadData();
@@ -1094,12 +1106,13 @@
       categories: S.categories.map(function (c) {
         return { id: c.id, name: c.name, color: c.color, icon: c.icon, sortOrder: c.sortOrder, createdAt: c.createdAt, updatedAt: c.updatedAt };
       }),
-      transactions: S.transactions.map(function (t) {
+      transactions: S.transactions.concat(S.tombstones || []).map(function (t) {
         var o = {
           id: t.id, type: t.type, amount: t.amount, categoryId: t.categoryId || null,
           note: t.note || "", date: t.date, createdAt: t.createdAt, updatedAt: t.updatedAt
         };
         if (t.type === "adjust") o.adjustSign = t.adjustSign === -1 ? -1 : 1;
+        if (t.deleted) o.deleted = true;
         return o;
       })
     };
@@ -1245,6 +1258,22 @@
     });
     data.transactions.forEach(function (x) {
       if (!x || !x.id) { bad++; return; }
+      if (x.deleted) {
+        var recT = {
+          id: String(x.id),
+          type: ["income", "expense", "adjust"].indexOf(x.type) >= 0 ? x.type : "expense",
+          amount: Math.round(Math.abs(Number(x.amount))) || 1,
+          categoryId: x.categoryId ? String(x.categoryId) : null,
+          note: String(x.note || "").slice(0, 200),
+          date: /^\d{4}-\d{2}-\d{2}$/.test(String(x.date || "")) ? String(x.date) : "2000-01-01",
+          createdAt: Number(x.createdAt) || t,
+          updatedAt: Number(x.updatedAt) || t,
+          deleted: true
+        };
+        if (recT.type === "adjust") recT.adjustSign = x.adjustSign === -1 ? -1 : 1;
+        txs.push(recT);
+        return;
+      }
       if (["income", "expense", "adjust"].indexOf(x.type) < 0) { bad++; return; }
       var amt = Number(x.amount);
       if (!isFinite(amt) || amt <= 0) { bad++; return; }
@@ -1338,7 +1367,8 @@
   function loadData() {
     return Promise.all([DB.getAll(DB.ST_CAT), DB.getAll(DB.ST_TX), DB.getSettings()]).then(function (r) {
       S.categories = r[0] || [];
-      S.transactions = r[1] || [];
+      S.tombstones = (r[1] || []).filter(function (x) { return !!(x && x.deleted); });
+      S.transactions = (r[1] || []).filter(function (x) { return !(x && x.deleted); });
       var st = r[2] || {};
       S.settings.theme = ["auto", "light", "dark"].indexOf(st.theme) >= 0 ? st.theme : "auto";
       if (st.lastBackupAt) S.settings.lastBackupAt = st.lastBackupAt;
@@ -1549,7 +1579,14 @@
     if (!window.DriveSync) return;
     DriveSync.init({
       version: APP_VERSION,
-      state: function () { return S; },
+      state: function () {
+        return {
+          settings: S.settings,
+          categories: S.categories,
+          transactions: S.transactions.concat(S.tombstones || []),
+          view: S.view
+        };
+      },
       buildBackup: buildBackup,
       normalize: normalizeBackup,
       replaceData: replaceData,
@@ -1624,7 +1661,18 @@
   }
 
   window.HesapDebug = {
-    counts: function () { return DB.counts(); },
+    counts: function () {
+      return DB.getAll(DB.ST_TX).then(function (all) {
+        all = all || [];
+        return DB.getAll(DB.ST_CAT).then(function (cats) {
+          return {
+            categories: (cats || []).length,
+            transactions: all.filter(function (x) { return !x.deleted; }).length,
+            tombstones: all.filter(function (x) { return !!x.deleted; }).length
+          };
+        });
+      });
+    },
     dump: buildBackup,
     drive: function () { return window.DriveSync ? DriveSync._state() : null; },
     version: APP_VERSION
