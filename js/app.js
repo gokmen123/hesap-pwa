@@ -1557,6 +1557,8 @@
       esc: esc,
       go: go,
       standalone: isStandalone,
+      view: function () { return S.view; },
+      render: render,
       confirm: function (title, body, opts) {
         return confirmDialog(title, body, opts).then(function (v) { closeDialog(); return v; });
       }
@@ -1589,7 +1591,8 @@
       if (!S.settings.seenIntro) {
         DB.setSetting("seenIntro", true);
         S.settings.seenIntro = true;
-        confirmDialog("Hesap'a hoş geldin",
+        /* Drive yedeği açıksa ilk açılışta onun karşılama sayfası gösterilir */
+        if (!(window.DriveSync && DriveSync.available())) confirmDialog("Hesap'a hoş geldin",
           "Veriler yalnızca bu cihazda kalır. <br><br><strong>iPhone notu:</strong> Safari sekmesi ile ana ekrana eklenen uygulama ayrı depolama kullanır — birinde girdiğin hareket diğerinde görünmez. Ara sıra <strong>Yedek al</strong>.",
           { okText: "Anladım", danger: false }).then(closeDialog);
       }

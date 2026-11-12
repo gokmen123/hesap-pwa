@@ -2,7 +2,7 @@
 
 Kişisel para takibi PWA'sı. Kategorilere ayrılmış gelir/gider, her zaman üstte duran toplam bakiye, aylık özet.
 
-- Tamamen statik. Kendi sunucusu yok. İsteğe bağlı **Google Drive yedeği** (kullanıcının kendi Apps Script köprüsü üzerinden, aşağıda).
+- Tamamen statik. Kendi sunucusu yok. İsteğe bağlı **Google Drive yedeği**: her kullanıcı kendi Google hesabıyla bağlanır, yedek kendi Drive'ına gider (aşağıda).
 - Veriler cihazda **IndexedDB** içinde kalır (`hesap-db`, şema 1).
 - Çevrimdışı çalışır (service worker).
 - iOS Safari: Paylaş → **Ana Ekrana Ekle** ile uygulama gibi açılır.
@@ -27,7 +27,8 @@ index.html            kabuk, tüm görünüm kapları
 css/app.css           token'lar + tüm stiller (açık/koyu tema)
 js/format.js          TL / tr-TR biçim, tarih, tutar girişi
 js/db.js              IndexedDB katmanı, yazma doğrulama, [DEPO] log
-js/sync.js            Drive eşitleme (Apps Script köprüsü), [DRIVE] log
+js/config.js          GOOGLE_CLIENT_ID (herkese açık OAuth Web istemci kimliği; boşsa Drive kapalı)
+js/sync.js            Google girişi + Drive v3 eşitleme, [DRIVE] log
 js/app.js             görünümler, formlar, yedek, hata ayıklama
 sw.js                 network-first index, cache-first varlıklar
 manifest.json         standalone, 180/192/512 ikonlar
@@ -42,7 +43,7 @@ Bağımlılık yok: npm, framework, CDN, analitik yok.
 
 Miktarlar **tam sayı kuruş** (`4825000` = `48.250,00 TL`).
 
-- `settings` — `theme` (`auto|light|dark`), `seenIntro`, `lastBackupAt`, `drive` (`{url, key, auto}`), `driveState` (`{rev, hash, syncedAt, remoteUpdatedAt, fileId}`), `safetyCopies` (son 3 yerel kopya)
+- `settings` — `theme` (`auto|light|dark`), `seenIntro`, `lastBackupAt`, `drive` (`{connected, email, name, auto}`), `driveToken` (`{access, exp}`, ~1 saat), `driveState` (`{rev, hash, syncedAt, remoteUpdatedAt, fileId, folderId, archiveId, lastArchiveAt}`), `driveWelcomeSeen`, `safetyCopies` (son 3 yerel kopya)
 - `categories` — `id, name, color, icon, sortOrder, createdAt, updatedAt`
 - `transactions` — `id, type(income|expense|adjust), amount, categoryId, note, date("YYYY-MM-DD"), createdAt, updatedAt`, `adjust` için `adjustSign: 1 | -1`
 
@@ -65,20 +66,22 @@ Ayarlar → **Yedek al** tek JSON dosyası üretir (Web Share, desteklenmiyorsa 
 
 ## Drive yedeği (0.3.0)
 
-Telefondaki IndexedDB her zaman asıl kopyadır; uygulama çevrimdışı tam çalışır. Drive bir yedek/eşitleme hedefidir.
+Telefondaki IndexedDB her zaman asıl kopyadır; uygulama çevrimdışı tam çalışır. Drive bir yedek/eşitleme hedefidir. **Her kullanıcı kendi Google hesabıyla bağlanır**, yedek o kullanıcının Drive'ında `Hesap/hesap_yedek.json` olarak durur.
 
-- **Köprü:** kullanıcının kendi Google hesabında yayınlanan bir Google Apps Script web uygulaması (`Execute as: Me`, erişim `Anyone`). Drive'da `Hesap/hesap_yedek.json` dosyasını okur/yazar. Kodu repo dışında tutulur (`Code.gs`); anahtar Script Properties'te (`HESAP_KEY`), repoda **yok**.
-- **Neden OAuth (GIS) değil:** iOS ana ekran (standalone) PWA'larında Google giriş açılır penceresi/yönlendirmesi güvenilir dönmüyor, erişim belirteci 1 saatte bitiyor (yenileme belirteci yok → sık sık yeniden giriş), Google Cloud projesi + izin ekranı kurulumu gerekiyor. Apps Script köprüsünde telefonda giriş yok, belirteç süresi yok; tek seferlik kurulum.
-- **İstek:** `fetch(url, {method:"POST", headers:{"Content-Type":"text/plain"}})` — basit istek, CORS ön-isteği olmaz. Gövde `{k, op, ...}`; `op`: `ping | meta | get | put`. `put` iyimser kilitli (`baseRev`); Drive'daki sürüm değiştiyse `conflict` döner. Her yazmadan önce eski dosya `Hesap/eski/` klasörüne kopyalanır (saatte en fazla bir, zorla gönderimde her zaman). Hiçbir şey silinmez.
-- **Kurulum (telefonda):** Ayarlar → **Drive yedeği** → kurulum bağlantısını (`…/hesap-pwa/#drive=<URL>&k=<ANAHTAR>`) yapıştır → **Bağla ve test et**. Bağlantı Safari'de açılırsa o sekme bağlanır ve ana ekran uygulaması için **Kopyala** önerir. Ayarlanmadıysa modül hiçbir istek atmaz.
-- **Karar mantığı** (açılışta, internet gelince, uygulama öne gelince — en az 45 sn arayla): yerel veri karması (SHA-256, kategoriler + hareketler) son eşitlenen karma ile, Drive `rev` son eşitlenen `rev` ile karşılaştırılır.
-  - yalnızca telefon değişti → **"Drive'a yedek alayım mı?"** (Otomatik yedekle açıksa sormadan gönderir)
-  - yalnızca Drive değişti → **"Drive'da yeni veri var, güncelleyeyim mi?"**
+- **Yapılandırma:** `js/config.js` → `GOOGLE_CLIENT_ID` (Google Cloud OAuth 2.0 *Web* istemci kimliği; gizli değil). Boşsa Drive özelliği tamamen kapalıdır, hiçbir istek atılmaz, eski ilk açılış notu gösterilir. Kurulum adımları: repo dışında `GOOGLE_KURULUM.md`.
+- **Kapsam:** `https://www.googleapis.com/auth/drive.file` — hassas olmayan kapsam (doğrulama gerekmez); uygulama yalnızca kendi oluşturduğu dosyaları görür. `drive.appdata` yerine seçildi çünkü kullanıcı yedeği Drive'ında görebilmeli (gizli klasör değil).
+- **Giriş:** OAuth 2.0 istemci tarafı akışı (`response_type=token`), **tam sayfa yönlendirme**, dönüş adresi uygulamanın kendisi (`https://gokmen123.github.io/hesap-pwa/`). iOS ana ekran (standalone) PWA'sında açılır pencere ve GIS popup güvenilir dönmediği için popup kullanılmaz. `state` doğrulanır, belirteç adres çubuğundan hemen silinir (`history.replaceState`).
+- **Belirteç ~1 saat.** Süresi dolunca: açılışta / internet gelince / gönderilecek değişiklik varken, ekranda açık sayfa yoksa **sessiz yönlendirme** (`prompt=none`, `login_hint=<e-posta>`, en fazla 10 dk'da bir). Sessiz olmazsa ana ekranda **"Drive'a yeniden bağlan"** şeridi ve Ayarlar'da düğme. E-posta Drive `about` uç noktasından alınır (ek kapsam yok).
+- **İlk açılış:** "Kayıtların güvende kalsın" karşılama sayfası — **Google ile bağlan** / **Şimdilik geç** (bir daha sormaz; Ayarlar'dan bağlanılır).
+- **Drive REST (v3):** klasör `Hesap` (+ `Hesap/eski`), dosya `hesap_yedek.json` (multipart yükleme). Özet bilgiler `appProperties` içinde (`rev, hash, at, device, tx, bal, last`) → kontrol için dosyayı indirmeye gerek yok. Yazmadan hemen önce Drive `rev` tekrar okunur (iyimser kilit; uyuşmazsa çakışma). Üzerine yazmadan önce eski sürüm sunucu tarafında `Hesap/eski/` klasörüne kopyalanır (saatte en fazla bir; çakışmada "Telefondakini gönder" ile her zaman). Hiçbir dosya silinmez.
+- **Karar mantığı** (açılışta, internet gelince, uygulama öne gelince — en az 45 sn arayla): yerel veri karması (SHA-256) son eşitlenen karma ile, Drive `rev` son eşitlenen `rev` ile karşılaştırılır.
+  - yalnızca telefon değişti → **"Drive'a yedek alayım mı?"** (Otomatik yedekle açıksa sormadan)
+  - yalnızca Drive değişti → **"Drive'da yeni veri var"**, güncelleyeyim mi?
   - ikisi de → **çakışma** sayfası (iki tarafın bakiye/hareket/tarih özeti): *Drive'dakini al* / *Telefondakini gönder* / *Sonra*
   - Drive boş, telefonda veri var → ilk yedek sorusu; hiç eşitlenmemiş + telefon boş → Drive'dan çekme sorusu.
-  - *Sonra* denince aynı durum bir daha sorulmaz; ana ekranda tek satır şerit kalır.
-- **Güvenlik kopyası:** Drive'dan çekmeden (ve güvenlik kopyası geri yüklemeden) önce telefondaki veri `safetyCopies` içine alınır (son 3), Ayarlar → Drive yedeği → **Güvenlik kopyaları**'ndan geri yüklenebilir.
-- Ayarlar → Drive yedeği: durum, son eşitleme, **Şimdi yedekle**, **Drive'dan çek**, **Test et**, **Otomatik yedekle**, **Güvenlik kopyaları**, bağlantı (anahtar maskeli), **Drive'da göster**, **Kaldır** (yalnızca bağlantıyı unutur).
+  - *Sonra* → aynı durum tekrar sorulmaz; ana ekranda tek satır şerit kalır.
+- **Güvenlik kopyası:** Drive'dan çekmeden önce telefondaki veri saklanır (son 3); Ayarlar → Drive yedeği → **Güvenlik kopyaları**.
+- Ayarlar → Drive yedeği: durum, son eşitleme, **Şimdi yedekle**, **Drive'dan çek**, **Kontrol et**, **Otomatik yedekle**, **Güvenlik kopyaları**, Google hesabı (ad + e-posta), **Drive'da göster**, **Kaldır** (belirteci iptal eder, yalnızca bağlantıyı unutur; veriye dokunmaz).
 
 ## Güncelleme (ana ekran simgesini silmeden)
 

@@ -15,6 +15,7 @@ var PRECACHE = [
   "./css/app.css",
   "./js/format.js",
   "./js/db.js",
+  "./js/config.js",
   "./js/sync.js",
   "./js/app.js",
   "./fonts/Outfit-VariableFont_wght.ttf",
