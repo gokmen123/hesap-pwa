@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "0.3.8";
+  var APP_VERSION = "0.3.9";
 
   /* ================= İKONLAR (yerleşik SVG kümesi) ================= */
   var ICONS = {
@@ -544,7 +544,7 @@
     var rows = list.filter(function (r) { return !reminderIsDone(r); });
     var html = '<div class="sec-head"><div class="sec-title">Hatırlatmalar</div>' +
       '<div class="sec-actions">' +
-        (rows.length ? '<button type="button" class="sec-action" id="rems-ics-all" data-act="remsIcsAll">Tümünü takvime ekle</button>' : '') +
+        (rows.length ? '<button type="button" class="sec-action" id="rems-ics-all" data-act="remsIcsAll">Takvime ekle (.ics)</button>' : '') +
         '<button class="sec-action" data-act="newReminder">Ekle</button>' +
       '</div></div>';
     if (!rows.length) {
@@ -1656,7 +1656,7 @@
         '<div class="form-error" id="form-error"></div>' +
         '<button class="save-btn" data-act="saveReminder">Kaydet</button>' +
         (isEdit
-          ? '<button class="ghost-btn" data-act="remIcs" data-id="' + esc(remForm.id) + '">Takvime ekle</button>' +
+          ? '<button class="ghost-btn" data-act="remIcs" data-id="' + esc(remForm.id) + '">Takvime ekle (.ics)</button>' +
             '<button class="danger-btn" data-act="delReminder" data-id="' + esc(remForm.id) + '">Sil</button>'
           : "") +
       '</div>';
@@ -1732,13 +1732,13 @@
     }
     var wasNew = !remForm.id;
     var oldRec = wasNew ? null : remById(remForm.id);
-    if (wasNew || reminderCalChanged(oldRec, rec)) publishReminderToCalendar(rec, !wasNew);
     DB.putReminder(rec).then(function (ok) {
       if (!ok) { formError("Kaydedilemedi, tekrar dene."); return; }
       return loadData().then(function () {
         closeSheet();
         render();
-        toast(wasNew ? "Hatırlatma eklendi. Takvimde Ekle'ye dokun." : (reminderCalChanged(oldRec, rec) ? "Hatırlatma güncellendi. Takvimde Ekle'ye dokun." : "Hatırlatma güncellendi"));
+        toast(wasNew ? "Hatırlatma eklendi" : "Hatırlatma güncellendi");
+        if (window.HesapCalendar) HesapCalendar.onReminderSaved(rec);
       });
     });
   }
@@ -1748,7 +1748,7 @@
     if (!r) return;
     confirmDialog("Hatırlatmayı sil", "Bu hatırlatma silinsin mi?", {
       okText: "Sil",
-      onConfirm: function () { cancelReminderOnCalendar(r); }
+      onConfirm: function () { if (window.HesapCalendar) HesapCalendar.onReminderDeleted(r); }
     }).then(function (ok) {
       if (!ok) { closeAllSwipe(); return; }
       var snap = Object.assign({}, r);
@@ -1929,8 +1929,7 @@
   function finishReminder(id, asTx) {
     var r = remById(id);
     if (!r) { closeSheet(); return; }
-    /* Aylık hatırlatma tamamlanınca seri durmaz; tek seferlikte takvimden kaldır. */
-    if (r.repeat !== "monthly") cancelReminderOnCalendar(r);
+    /* Aylık hatırlatma tamamlanınca seri durmaz; tek seferlikte takvim olayı silinir. */
     var jobs = [];
     var when = now();
     if (asTx) {
@@ -1957,6 +1956,10 @@
       closeSheet();
       render();
       toast(asTx ? "Hareket kaydedildi" : (r.repeat === "monthly" ? "Sonraki aya alındı" : "Tamamlandı"));
+      if (window.HesapCalendar) {
+        if (r.repeat === "monthly") HesapCalendar.onReminderSaved(rec);
+        else HesapCalendar.onReminderDeleted(r);
+      }
     });
   }
 
@@ -2083,7 +2086,10 @@
       format: 1,
       appVersion: APP_VERSION,
       exportedAt: new Date().toISOString(),
-      settings: { theme: S.settings.theme || "auto" },
+      settings: {
+        theme: S.settings.theme || "auto",
+        calendarId: (window.DriveSync && DriveSync._state && DriveSync._state().calendarId) || S.settings.calendarId || null
+      },
       categories: S.categories.concat(S.catTombs || []).map(function (c) {
         var o = { id: c.id, name: c.name, color: c.color, icon: c.icon, sortOrder: c.sortOrder, createdAt: c.createdAt, updatedAt: c.updatedAt, kind: catKindOf(c) };
         if (c.deleted) o.deleted = true;
@@ -2094,7 +2100,8 @@
           id: r.id, type: r.type, amount: r.amount, categoryId: r.categoryId || null,
           date: r.date, repeat: r.repeat || null, note: r.note || "",
           done: !!r.done, doneAt: r.doneAt || null, lastDoneDate: r.lastDoneDate || null,
-          createdAt: r.createdAt, updatedAt: r.updatedAt
+          createdAt: r.createdAt, updatedAt: r.updatedAt,
+          googleEventId: r.googleEventId || null
         };
         if (r.deleted) o.deleted = true;
         return o;
@@ -2302,7 +2309,8 @@
         doneAt: r.doneAt ? Number(r.doneAt) : null,
         lastDoneDate: r.lastDoneDate || null,
         createdAt: Number(r.createdAt) || t,
-        updatedAt: Number(r.updatedAt) || t
+        updatedAt: Number(r.updatedAt) || t,
+        googleEventId: r.googleEventId ? String(r.googleEventId) : null
       };
       if (r.deleted) recR.deleted = true;
       rems.push(recR);
@@ -2653,6 +2661,19 @@
   }
 
   /* ================= DRIVE EŞİTLEME ================= */
+  function patchReminderFields(fields) {
+    if (!fields || !fields.id) return Promise.resolve(false);
+    var r = remById(fields.id);
+    if (!r) {
+      var tombs = S.remTombs || [];
+      for (var i = 0; i < tombs.length; i++) if (tombs[i].id === fields.id) r = tombs[i];
+    }
+    if (!r) return Promise.resolve(false);
+    var rec = Object.assign({}, r, fields);
+    rec.updatedAt = now();
+    return DB.putReminder(rec).then(function () { return loadData(); });
+  }
+
   function startDriveSync() {
     if (!window.DriveSync) return;
     DriveSync.init({
@@ -2677,7 +2698,9 @@
       render: render,
       confirm: function (title, body, opts) {
         return confirmDialog(title, body, opts).then(function (v) { closeDialog(); return v; });
-      }
+      },
+      reminderTitle: reminderCalTitle,
+      patchReminder: patchReminderFields
     }).catch(function (e) {
       DB.log("DRIVE", "başlatılamadı: " + (e && e.message ? e.message : e));
     });
@@ -2800,6 +2823,8 @@
       return buildCalendarIcs(rows);
     },
     lastIcs: function () { return window.__hesapLastIcs || null; },
+    calendar: function () { return window.HesapCalendar ? HesapCalendar.debug() : null; },
+    requestCalendar: function () { return window.HesapCalendar ? HesapCalendar.requestAccess() : null; },
     state: function () { return S; }
   };
 

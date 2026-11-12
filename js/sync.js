@@ -1,4 +1,4 @@
-/* Hesap — Google Drive eşitleme (0.3.7)
+/* Hesap — Google Drive eşitleme (0.3.9)
    Telefondaki IndexedDB her zaman asıl kopyadır (yazmalar önce buraya).
    Açılışta, bağlanınca ve internet gelince: çevrimiçiyken Drive'dan
    Hesap/hesap_veri.json ÖNCE çekilir (soru yok); üzerine yazmadan önce
@@ -96,7 +96,9 @@ window.DriveSync = (function () {
       connected: !!cfg.connected, email: cfg.email || null, name: cfg.name || null,
       auto: cfg.auto !== false, autoOnDefault: true,
       wideScope: !!cfg.wideScope, adoptDenied: !!cfg.adoptDenied,
-      ownFile: !!cfg.ownFile
+      ownFile: !!cfg.ownFile,
+      calendarScope: !!cfg.calendarScope, calendarId: cfg.calendarId || null,
+      calendarDenied: !!cfg.calendarDenied, calendarBackfilled: !!cfg.calendarBackfilled
     } : null);
   }
   function saveTok() { return DB.setSetting("driveToken", tok); }
@@ -115,13 +117,27 @@ window.DriveSync = (function () {
     return Array.prototype.map.call(a, function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
   }
 
-  function scopeList() {
-    return SCOPE;
+  function calScopes() {
+    var ev = (window.HesapCalendar && HesapCalendar.CAL_EVENTS) || C.CALENDAR_SCOPE || "https://www.googleapis.com/auth/calendar.events";
+    var ap = (window.HesapCalendar && HesapCalendar.CAL_APP) || C.CALENDAR_APP_SCOPE || "https://www.googleapis.com/auth/calendar.app.created";
+    return ev + " " + ap;
+  }
+  function scopeHasCal(s) {
+    if (window.HesapCalendar && HesapCalendar.scopeHasCal) return HesapCalendar.scopeHasCal(s);
+    return String(s || "").indexOf("https://www.googleapis.com/auth/calendar") >= 0;
+  }
+  function hasCalScope() {
+    if (tok && scopeHasCal(tok.scopes)) return true;
+    return !!(cfg && cfg.calendarScope);
+  }
+  function scopeList(intent) {
+    var wantCal = intent === "calendar" || !!(cfg && cfg.calendarScope);
+    return wantCal ? (SCOPE + " " + calScopes()) : SCOPE;
   }
 
   function startAuth(intent, silent) {
     var state = rnd();
-    var scope = scopeList();
+    var scope = scopeList(intent);
     try {
       sessionStorage.setItem(OAUTH_KEY, JSON.stringify({ state: state, intent: intent || "check", silent: !!silent, at: Date.now() }));
       if (silent) sessionStorage.setItem("hesap_silent_at", String(Date.now()));
@@ -135,10 +151,11 @@ window.DriveSync = (function () {
       state: state
     };
     if (silent) q.prompt = "none";
+    else if (intent === "calendar") q.prompt = "consent";
     else if (!cfg || !cfg.email) q.prompt = "select_account";
     if (cfg && cfg.email) q.login_hint = cfg.email;
     var url = AUTH_URL + "?" + Object.keys(q).map(function (k) { return k + "=" + encodeURIComponent(q[k]); }).join("&");
-    log((silent ? "sessiz " : "") + "Google girişine yönlendiriliyor · amaç: " + intent + " · kapsam: drive.file");
+    log((silent ? "sessiz " : "") + "Google girişine yönlendiriliyor · amaç: " + intent + " · kapsam: " + scope);
     status = "busy"; paint();
     setTimeout(function () { location.assign(url); }, silent ? 0 : 120);
     return new Promise(function () {});   /* sayfa ayrılıyor */
@@ -161,9 +178,14 @@ window.DriveSync = (function () {
       return { ok: false, intent: null, error: "state" };
     }
     if (p.access_token) {
-      tok = { access: p.access_token, exp: Date.now() + (Number(p.expires_in) || 3600) * 1000 };
+      tok = { access: p.access_token, exp: Date.now() + (Number(p.expires_in) || 3600) * 1000, scopes: p.scope || "" };
       needInteractive = false;
-      log("Google girişi tamam · belirteç " + Math.round((tok.exp - Date.now()) / 60000) + " dk");
+      if (scopeHasCal(tok.scopes)) {
+        if (!cfg) cfg = { connected: true, auto: true, autoOnDefault: true };
+        cfg.calendarScope = true;
+        cfg.calendarDenied = false;
+      }
+      log("Google girişi tamam · belirteç " + Math.round((tok.exp - Date.now()) / 60000) + " dk · kapsam: " + (tok.scopes || ""));
       return { ok: true, intent: saved.intent, silent: saved.silent };
     }
     log("Google girişi: " + (p.error || "hata") + (saved.silent ? " (sessiz)" : ""));
@@ -455,7 +477,7 @@ window.DriveSync = (function () {
       return [t.id, t.type, t.amount, t.categoryId || null, t.note || "", t.date, t.type === "adjust" ? (t.adjustSign === -1 ? -1 : 1) : 0, t.deleted ? 1 : 0];
     }).sort(function (a, b) { return a[0] < b[0] ? -1 : 1; });
     var rems = (s.reminders || []).map(function (r) {
-      return [r.id, r.type, Number(r.amount) || 0, r.categoryId || null, r.date || "", r.repeat || "", r.note || "", r.done ? 1 : 0, r.deleted ? 1 : 0];
+      return [r.id, r.type, Number(r.amount) || 0, r.categoryId || null, r.date || "", r.repeat || "", r.note || "", r.done ? 1 : 0, r.deleted ? 1 : 0, r.googleEventId || ""];
     }).sort(function (a, b) { return a[0] < b[0] ? -1 : 1; });
     return JSON.stringify([cats, txs, rems]);
   }
@@ -636,7 +658,12 @@ window.DriveSync = (function () {
         return;
       }
       if (sameRem(a, r)) {
-        if (Number(r.updatedAt || 0) > Number(a.updatedAt || 0)) remMap[r.id] = r;
+        var newerR2 = Number(r.updatedAt || 0) > Number(a.updatedAt || 0) ? r : a;
+        var olderR2 = newerR2 === r ? a : r;
+        if (!newerR2.googleEventId && olderR2.googleEventId) {
+          newerR2 = Object.assign({}, newerR2, { googleEventId: olderR2.googleEventId });
+        }
+        remMap[r.id] = newerR2;
         return;
       }
       var nR = pickNewer(a, r);
@@ -1212,8 +1239,20 @@ window.DriveSync = (function () {
         '<div class="drv-acct">' + GLOBO() + '<div><div class="k">' + esc(cfg.name || "Google hesabı") + '</div><div class="d">' + esc(cfg.email || "") + '</div></div></div>' +
         '<button class="drv-mini" data-drv="disconnect">Kaldır</button>' +
       '</div>' +
-      (st.folderId ? '<a class="set-row" href="https://drive.google.com/drive/folders/' + encodeURIComponent(st.folderId) + '" target="_blank" rel="noopener">' +
-        '<div><div class="k">Drive\'da göster</div><div class="d">Hesap/hesap_veri.json</div></div><div class="v">›</div></a>' : '');
+            (st.folderId ? '<a class="set-row" href="https://drive.google.com/drive/folders/' + encodeURIComponent(st.folderId) + '" target="_blank" rel="noopener">' +
+        '<div><div class="k">Drive\'da göster</div><div class="d">Hesap/hesap_veri.json</div></div><div class="v">›</div></a>' : '') +
+      calendarSettingsRow();
+  }
+  function calendarSettingsRow() {
+    var on = hasCalScope();
+    var id = (cfg && cfg.calendarId) || "";
+    var named = id && id !== "primary";
+    var d = on
+      ? (named ? "Hesap Hatırlatmalar takvimine yazılıyor" : "Birincil takvime yazılıyor")
+      : "Hatırlatmaları Gmail takvimine yazmak için izin ver";
+    var k = on ? "Google Takvim bağlı" : "Google Takvim";
+    return '<button class="set-row" data-drv="calendarAuth"><div><div class="k">' + k + '</div><div class="d">' + d +
+      '</div></div><div class="v">' + (on ? "✓" : "›") + '</div></button>';
   }
   function GLOBO() { return GLOGO; }
 
@@ -1312,6 +1351,9 @@ window.DriveSync = (function () {
     else if (a === "reauth") startAuth("check", false);
     else if (a === "goSettings") A.go("settings");
     else if (a === "connect") connect();
+    else if (a === "calendarAuth") {
+      if (window.HesapCalendar && HesapCalendar.requestAccess) HesapCalendar.requestAccess();
+    }
     else if (a === "skipWelcome") skipWelcome();
     else if (a === "pushNow") {
       if (remote && remote.exists && st.rev != null && remote.rev !== st.rev) mergeFromDrive({ reason: "elle yedek" });
@@ -1346,10 +1388,44 @@ window.DriveSync = (function () {
     log("karşılama: şimdilik geçildi");
   }
 
+
+  function bindCalendar() {
+    if (!window.HesapCalendar || !A) return;
+    HesapCalendar.attach({
+      api: api,
+      hasToken: hasToken,
+      hasCalScope: hasCalScope,
+      startCalAuth: function () { startAuth("calendar", false); },
+      getCfg: function () { return cfg; },
+      saveCalCfg: function (partial) {
+        if (!cfg) return Promise.resolve();
+        Object.keys(partial || {}).forEach(function (k) { cfg[k] = partial[k]; });
+        return saveCfg();
+      },
+      log: function (m) { log("takvim · " + m); },
+      confirm: function (title, body, opts) { return A.confirm(title, body, opts); },
+      reminders: function () {
+        var s = A.state ? A.state() : {};
+        return (s.reminders || []).concat(s.remTombs || []);
+      },
+      patchReminder: function (fields) { return A.patchReminder ? A.patchReminder(fields) : Promise.resolve(); },
+      reminderTitle: function (r) { return A.reminderTitle ? A.reminderTitle(r) : ((r && r.note) || ""); },
+      render: function () { if (A.render) A.render(); },
+      online: function () { return navigator.onLine !== false; },
+      needAuth: function () { needInteractive = true; status = "auth"; paint(); }
+    });
+  }
+  function kickCalendar(reason) {
+    if (window.HesapCalendar && HesapCalendar.kick) {
+      try { return HesapCalendar.kick(reason); } catch (e) { log("takvim kick: " + (e && e.message ? e.message : e)); }
+    }
+  }
+
   /* ================= BAŞLAT ================= */
   /* init: {welcome:true} ise ilk açılış karşılaması gösterilebilir. true döner = karşılama gösterildi */
   function init(api) {
     A = api;
+    bindCalendar();
     if (!available()) return Promise.resolve(false);
     document.addEventListener("click", function (ev) { if (onClick(ev)) ev.stopPropagation(); }, true);
     var ret = null, welcomeShown = false;
@@ -1361,12 +1437,15 @@ window.DriveSync = (function () {
           connected: true, email: d.email || null, name: d.name || null,
           auto: migrated ? !!d.auto : true, autoOnDefault: true,
           wideScope: !!d.wideScope, adoptDenied: !!d.adoptDenied,
-          ownFile: !!d.ownFile
+          ownFile: !!d.ownFile,
+          calendarScope: !!d.calendarScope, calendarId: d.calendarId || null,
+          calendarDenied: !!d.calendarDenied, calendarBackfilled: !!d.calendarBackfilled
         };
         if (!migrated) log("otomatik eşitleme varsayılan olarak açıldı");
       }
       var t = all.driveToken;
-      if (t && t.access && t.exp) tok = { access: t.access, exp: Number(t.exp) };
+      if (t && t.access && t.exp) tok = { access: t.access, exp: Number(t.exp), scopes: t.scopes || "" };
+      if (tok && scopeHasCal(tok.scopes) && cfg) { cfg.calendarScope = true; }
       var s = all.driveState;
       if (s) { st = freshSt(); Object.keys(st).forEach(function (k) { if (s[k] !== undefined) st[k] = s[k]; }); }
       ret = consumeRedirect();
@@ -1378,7 +1457,11 @@ window.DriveSync = (function () {
         });
       }
       if (ret && !ret.ok && !ret.silent && ret.error === "access_denied") {
-        A.toast("Google bağlantısı iptal edildi");
+        if (ret.intent === "calendar") {
+          if (cfg) { cfg.calendarDenied = true; }
+        } else {
+          A.toast("Google bağlantısı iptal edildi");
+        }
       }
       if (ret && !ret.ok && ret.silent) status = "auth";
       if (!configured() && !all.driveWelcomeSeen && !(ret && ret.ok)) { welcomeShown = showWelcome(); }
@@ -1401,15 +1484,24 @@ window.DriveSync = (function () {
             return refreshLocalHash().then(function () { return remoteMeta(); }).then(function (m) { remote = m; return push(op === "pushForce", { silent: true }); }).catch(function () { return check("açılış", { force: true }); });
           }
           if (op === "pull") return pull();
-          return check(ret.intent === "connect" ? "bağlantı" : "açılış", { force: true });
+          return check(ret.intent === "connect" ? "bağlantı" : "açılış", { force: true }).then(function () {
+            kickCalendar(ret.intent === "calendar" ? "auth-return" : "bağlantı");
+          });
         }, delayMs);
+        if (ret.intent === "calendar") {
+          setTimeout(function () { kickCalendar("auth-return"); }, delayMs + 200);
+        }
       } else if (configured() && status !== "auth") {
-        setTimeout(function () { check("açılış", { force: false }); }, 900);
+        setTimeout(function () {
+          check("açılış", { force: false }).then(function () { kickCalendar("açılış"); });
+        }, 900);
       }
       window.addEventListener("online", function () {
         log("internet geldi");
         paint();
-        setTimeout(function () { check("internet geldi", { force: true }); }, 1200);
+        setTimeout(function () {
+          check("internet geldi", { force: true }).then(function () { kickCalendar("internet geldi"); });
+        }, 1200);
       });
       window.addEventListener("offline", function () { status = "offline"; paint(); });
       document.addEventListener("visibilitychange", function () {
@@ -1429,6 +1521,8 @@ window.DriveSync = (function () {
     check: check,
     paint: paint,
     dotHtml: dotHtml,
-    _state: function () { return { cfg: cfg, hasToken: hasToken(), st: st, pending: pending, status: status, needInteractive: needInteractive, localHash: localHash, remote: remote, ownFile: !!(cfg && cfg.ownFile), fileName: FILE_NAME }; }
+    requestCalendar: function () { if (window.HesapCalendar) return HesapCalendar.requestAccess(); },
+    hasCalScope: hasCalScope,
+    _state: function () { return { cfg: cfg, hasToken: hasToken(), st: st, pending: pending, status: status, needInteractive: needInteractive, localHash: localHash, remote: remote, ownFile: !!(cfg && cfg.ownFile), fileName: FILE_NAME, calendarId: cfg && cfg.calendarId, calendarScope: !!(cfg && cfg.calendarScope) }; }
   };
 })();

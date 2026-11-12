@@ -1,4 +1,4 @@
-# Hesap — 0.3.8
+# Hesap — 0.3.9
 
 Kişisel para takibi PWA'sı. Kategorilere ayrılmış gelir/gider, her zaman üstte duran toplam bakiye, aylık özet.
 
@@ -64,9 +64,9 @@ Ayarlar → **Yedek al** tek JSON dosyası üretir (Web Share, desteklenmiyorsa 
 
 > iPhone notu: Safari sekmesi ile ana ekrana eklenen uygulama ayrı depolama kullanır. Birinde girilen hareket diğerinde görünmez. Bu yüzden yedek önemli.
 
-## Drive yedeği (0.3.8)
+## Drive yedeği (0.3.9)
 
-Telefondaki IndexedDB her zaman asıl kopyadır; yazmalar önce telefona gider, uygulama çevrimdışı tam çalışır. 0.3.2'den itibaren internet varken açılışta Drive'dan otomatik çekilir, değişiklikler sormadan geri gönderir (otomatik eşitleme varsayılan açık). 0.3.7: kapsam yalnızca `drive.file`. Uygulama dosyası `Hesap/hesap_veri.json` (uygulamanın oluşturduğu). İlk açılışta eski `hesap_yedek.json` hâlâ görünüyorsa içeriği yeni dosyaya kopyalanır, eski dosyaya dokunulmaz; görünmüyorsa yerel IndexedDB yüklenir. Yeni/boş Drive hata vermez. Jeton süresi bitince sessiz yenileme + kuyruk; geçici ağ/5xx yeniden denenir; eşzamanlı gönderimler kilitlenir; durum küçük bir noktayla gösterilir, uyarı yalnızca yeniden giriş gerektiğinde çıkar. Silinen kayıtlar tombstone olarak kalır. 0.3.5: yıllık özet, kategori çipleri, hatırlatmalar, kategori yönetimi. 0.3.6: canlı gider dağılımı renkleri, kaydırarak Sil, hatırlatma klavyesi. 0.3.7 ayrıca: hatırlatmaya dokununca Ödendi/Alındı – hesaba işle, Tamamlandı (işlemeden) veya Vazgeç. 0.3.8: hatırlatma kaydedilince takvim dosyası (.ics) aynı dokunuşta açılır (UID sabit, aylıkta RRULE, 1 gün önce ve gününde 09:00 alarm). Tümünü takvime ekle. Silme/tamamlamada METHOD:CANCEL (aylık tamamlamada seri iptal edilmez). Çakışmada kayıtlar id + updatedAt ile birleştirilir. **Her kullanıcı kendi Google hesabıyla bağlanır.**
+Telefondaki IndexedDB her zaman asıl kopyadır; yazmalar önce telefona gider, uygulama çevrimdışı tam çalışır. 0.3.2'den itibaren internet varken açılışta Drive'dan otomatik çekilir, değişiklikler sormadan geri gönderir (otomatik eşitleme varsayılan açık). 0.3.7: kapsam yalnızca `drive.file`. Uygulama dosyası `Hesap/hesap_veri.json` (uygulamanın oluşturduğu). İlk açılışta eski `hesap_yedek.json` hâlâ görünüyorsa içeriği yeni dosyaya kopyalanır, eski dosyaya dokunulmaz; görünmüyorsa yerel IndexedDB yüklenir. Yeni/boş Drive hata vermez. Jeton süresi bitince sessiz yenileme + kuyruk; geçici ağ/5xx yeniden denenir; eşzamanlı gönderimler kilitlenir; durum küçük bir noktayla gösterilir, uyarı yalnızca yeniden giriş gerektiğinde çıkar. Silinen kayıtlar tombstone olarak kalır. 0.3.5: yıllık özet, kategori çipleri, hatırlatmalar, kategori yönetimi. 0.3.6: canlı gider dağılımı renkleri, kaydırarak Sil, hatırlatma klavyesi. 0.3.7 ayrıca: hatırlatmaya dokununca Ödendi/Alındı – hesaba işle, Tamamlandı (işlemeden) veya Vazgeç. 0.3.8: elle takvim dosyası (.ics) — UID sabit, aylıkta RRULE, 1 gün önce ve gününde 09:00 alarm; silmede METHOD:CANCEL. 0.3.9: hatırlatmalar bağlanan Gmail hesabındaki **Hesap Hatırlatmalar** takvimine otomatik yazılır (Google Calendar API, `calendar.events` + takvim oluşturmak için `calendar.app.created`; izin yalnızca gerektiğinde, Türkçe onay). Kayıt/güncelleme olayı ekler veya günceller; silme ve tek sefer tamamlamada olay silinir; aylık tamamlamada seri durur, tarih sonraki aya alınır. İlk izinden sonra mevcut açık hatırlatmalar bir kez işlenir (kopya yok). Otomatik .ics açılması kalktı; **Takvime ekle (.ics)** yalnızca yedek yol. Çevrimdışı kuyruk + jeton yenileme; hata bildirimi yalnızca yeniden giriş gerektiğinde. Çakışmada kayıtlar id + updatedAt ile birleştirilir. **Her kullanıcı kendi Google hesabıyla bağlanır.**
 
 - **Yapılandırma:** `js/config.js` → `GOOGLE_CLIENT_ID` (Google Cloud OAuth 2.0 *Web* istemci kimliği; gizli değil). Boşsa Drive özelliği tamamen kapalıdır, hiçbir istek atılmaz, eski ilk açılış notu gösterilir. Kurulum adımları: repo dışında `GOOGLE_KURULUM.md`.
 - **Kapsam:** `https://www.googleapis.com/auth/drive.file` — hassas olmayan kapsam (doğrulama gerekmez); uygulama yalnızca kendi oluşturduğu dosyaları görür. `drive.appdata` yerine seçildi çünkü kullanıcı yedeği Drive'ında görebilmeli (gizli klasör değil).
@@ -92,4 +92,4 @@ Service worker her varlığı **network-first** getirir (6 sn zaman aşımı; a�
 
 ## Sürüm
 
-`0.3.8`. Uygulama sürümü `js/app.js` içindeki `APP_VERSION`; sürüm damgası `version.json`.
+`0.3.9`. Uygulama sürümü `js/app.js` içindeki `APP_VERSION`; sürüm damgası `version.json`.

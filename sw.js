@@ -5,7 +5,7 @@
    ana ekrandaki simgeyi silip yeniden eklemek GEREKMEZ.
    CACHE_NAME yalnızca çevrimdışı kopyanın adıdır; artırmak zorunlu değil. */
 
-var CACHE_NAME = "hesap-pwa-v14";
+var CACHE_NAME = "hesap-pwa-v15";
 
 var PRECACHE = [
   "./",
@@ -17,6 +17,7 @@ var PRECACHE = [
   "./js/db.js",
   "./js/config.js",
   "./js/sync.js",
+  "./js/calendar.js",
   "./js/app.js",
   "./fonts/Outfit-VariableFont_wght.ttf",
   "./fonts/InstrumentSerif-Regular.ttf",
