@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "0.3.5";
+  var APP_VERSION = "0.3.6";
 
   /* ================= İKONLAR (yerleşik SVG kümesi) ================= */
   var ICONS = {
@@ -199,6 +199,107 @@
     return (c && (c.kind === "income" || c.kind === "expense")) ? c.kind : "both";
   }
 
+  var CHART_COLORS = [
+    "#E24B42", "#2F6BFF", "#0C9A6A", "#F0A202",
+    "#9B5CFF", "#E85D04", "#0AA7B8", "#D72660",
+    "#3D8B4F", "#1D4ED8", "#C2410C", "#7C3AED"
+  ];
+  var DONUT_MIN_DEG = 10;
+
+  function hexRgb(hex) {
+    var h = String(hex || "").replace("#", "");
+    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+    if (!/^[0-9a-fA-F]{6}$/.test(h)) return null;
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  }
+  function colorDist(a, b) {
+    var A = hexRgb(a), B = hexRgb(b);
+    if (!A || !B) return 999;
+    return Math.abs(A[0]-B[0]) + Math.abs(A[1]-B[1]) + Math.abs(A[2]-B[2]);
+  }
+  function isDullColor(hex) {
+    var rgb = hexRgb(hex);
+    if (!rgb) return true;
+    var r = rgb[0], g = rgb[1], b = rgb[2];
+    var max = Math.max(r, g, b), min = Math.min(r, g, b);
+    var sat = max === 0 ? 0 : (max - min) / max;
+    var lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    return sat < 0.28 || lum < 0.22 || lum > 0.84;
+  }
+  function assignChartColors(parts) {
+    var used = [];
+    return parts.map(function (p, i) {
+      var c = p.color;
+      var taken = function (col) {
+        return used.some(function (u) { return colorDist(u, col) < 70; });
+      };
+      if (!c || isDullColor(c) || taken(c)) {
+        c = CHART_COLORS[i % CHART_COLORS.length];
+        var k = 0;
+        while (taken(c) && k < CHART_COLORS.length) {
+          k++;
+          c = CHART_COLORS[(i + k) % CHART_COLORS.length];
+        }
+      }
+      used.push(c);
+      var q = {};
+      Object.keys(p).forEach(function (key) { q[key] = p[key]; });
+      q.chartColor = c;
+      return q;
+    });
+  }
+  function donutSliceLens(parts, total) {
+    var circ = 2 * Math.PI * 36;
+    var n = parts.length;
+    var minLen = circ * (DONUT_MIN_DEG / 360);
+    if (n > 1) minLen = Math.min(minLen, (circ * 0.4) / n);
+    var raw = parts.map(function (p) { return total ? Math.max(0, p.amount) / total * circ : 0; });
+    var out = raw.slice();
+    var extra = 0, big = 0;
+    for (var i = 0; i < out.length; i++) {
+      if (out[i] > 0 && out[i] < minLen) { extra += minLen - out[i]; out[i] = minLen; }
+      else if (out[i] >= minLen) big += out[i];
+    }
+    if (extra > 0 && big > extra) {
+      for (var j = 0; j < out.length; j++) {
+        if (raw[j] >= minLen) out[j] -= extra * (raw[j] / big);
+      }
+    }
+    return { lens: out, circ: circ, minLen: minLen };
+  }
+  function pctLabel(amount, total) {
+    if (!total || amount <= 0) return "0%";
+    var exact = amount / total * 100;
+    if (exact < 1) return "<1%";
+    return Math.round(exact) + "%";
+  }
+  function donutSvgAndLegend(parts, total, opts) {
+    opts = opts || {};
+    parts = assignChartColors(parts);
+    var sl = donutSliceLens(parts, total);
+    var acc = 0;
+    var svg = '<svg class="donut" id="' + esc(opts.svgId || "chart-donut") + '" viewBox="0 0 80 80" aria-hidden="true">';
+    parts.forEach(function (p, i) {
+      var len = sl.lens[i];
+      svg += '<circle class="donut-slice" data-cat="' + esc(p.id || "_") + '" cx="40" cy="40" r="36" fill="none" stroke="' + p.chartColor + '" stroke-width="8" stroke-linecap="butt" ' +
+        'stroke-dasharray="' + len.toFixed(3) + " " + (sl.circ - len).toFixed(3) + '" stroke-dashoffset="' + (-acc).toFixed(3) + '"/>';
+      acc += len;
+    });
+    svg += "</svg>";
+    var legend = parts.map(function (p) {
+      var open = p.id
+        ? ' type="button" data-act="' + esc(opts.act || "openCatMonth") + '" data-id="' + esc(p.id) + '"' +
+          (opts.month ? ' data-month="' + esc(opts.month) + '"' : "") +
+          (opts.year ? ' data-year="' + esc(opts.year) + '"' : "")
+        : ' type="button" disabled';
+      return '<button class="leg"' + open + '>' +
+        '<i class="swatch" style="background:' + p.chartColor + '"></i>' +
+        '<div class="name">' + esc(p.name) + " · " + pctLabel(p.amount, total) + "</div>" +
+        '<div class="amt">−' + Fmt.money(p.amount) + "</div></button>";
+    }).join("");
+    return { svg: svg, legend: legend, parts: parts, minLen: sl.minLen };
+  }
+
   function sortTxDesc(a, b) {
     if (a.date !== b.date) return a.date < b.date ? 1 : -1;
     return (b.createdAt || 0) - (a.createdAt || 0);
@@ -332,12 +433,34 @@
   }
 
   /* ================= YARDIMCI: DOM ================= */
-  function toast(msg) {
+  function toast(msg, opts) {
+    opts = opts || {};
     var el = $("#toast");
-    el.textContent = msg;
-    el.classList.add("show");
+    el.innerHTML = "";
+    var span = document.createElement("span");
+    span.textContent = msg;
+    el.appendChild(span);
     clearTimeout(toast._t);
-    toast._t = setTimeout(function () { el.classList.remove("show"); }, 2200);
+    toast._undo = null;
+    if (opts.action) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "toast-undo";
+      b.textContent = opts.actionLabel || "Geri al";
+      b.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        clearTimeout(toast._t);
+        el.classList.remove("show");
+        var fn = opts.action;
+        toast._undo = null;
+        if (fn) fn();
+      });
+      el.appendChild(b);
+      toast._undo = opts.action;
+    }
+    el.classList.add("show");
+    toast._t = setTimeout(function () { el.classList.remove("show"); toast._undo = null; }, opts.hold || (opts.action ? 5000 : 2200));
   }
 
   var dlgResolve = null;
@@ -429,14 +552,16 @@
       var when = over ? "Gecikti · " + Fmt.fullDate(r.date) : Fmt.fullDate(r.date);
       if (r.repeat === "monthly") when += " · her ay";
       var sub = typ + " · " + when + (cat ? " · " + cat.name : "") + (r.note ? " · " + r.note : "");
-      return '<div class="rem' + (over ? " over" : "") + '" data-rem="' + esc(r.id) + '">' +
-        '<div class="rem-ico">' + svg("bell") + '</div>' +
-        '<button class="rem-body" data-act="remOpen" data-id="' + esc(r.id) + '">' +
-          '<div class="rem-name">' + esc(typ) + (r.note ? " — " + esc(r.note) : "") + '</div>' +
-          '<div class="rem-sub">' + esc(sub) + '</div></button>' +
-        '<div class="rem-amt ' + (r.type === "receive" ? "get" : "pay") + '">' + Fmt.money(r.amount) + '</div>' +
-        '<button class="rem-cal" data-act="remIcs" data-id="' + esc(r.id) + '" aria-label="Takvime ekle">' + svg("cal") + '</button>' +
-      '</div>';
+      return '<div class="swipe-row" data-swipe="rem" data-id="' + esc(r.id) + '">' +
+        '<div class="swipe-actions"><button type="button" class="swipe-del" data-act="swipeDelRem" data-id="' + esc(r.id) + '">Sil</button></div>' +
+        '<div class="swipe-front rem' + (over ? " over" : "") + '" data-rem="' + esc(r.id) + '">' +
+          '<div class="rem-ico">' + svg("bell") + '</div>' +
+          '<button class="rem-body" data-act="remOpen" data-id="' + esc(r.id) + '">' +
+            '<div class="rem-name">' + esc(typ) + (r.note ? " — " + esc(r.note) : "") + '</div>' +
+            '<div class="rem-sub">' + esc(sub) + '</div></button>' +
+          '<div class="rem-amt ' + (r.type === "receive" ? "get" : "pay") + '">' + Fmt.money(r.amount) + '</div>' +
+          '<button class="rem-cal" data-act="remIcs" data-id="' + esc(r.id) + '" aria-label="Takvime ekle">' + svg("cal") + '</button>' +
+        '</div></div>';
     }).join("") + '</div>';
   }
 
@@ -533,10 +658,12 @@
     else if (cat) ico = '<div class="tx-ico" style="' + catStyle(cat) + '">' + svg(cat.icon) + '</div>';
     else ico = '<div class="tx-ico adjust">' + svg("tag") + '</div>';
 
-    return '<button class="tx" data-tx="' + esc(t.id) + '">' + ico +
-      '<div class="tx-body"><div class="tx-name">' + esc(title) + '</div>' +
-      '<div class="tx-note">' + esc(sub) + '</div></div>' +
-      '<div class="tx-amt ' + cls + '">' + Fmt.sgn(eff) + '</div></button>';
+    return '<div class="swipe-row" data-swipe="tx" data-id="' + esc(t.id) + '">' +
+      '<div class="swipe-actions"><button type="button" class="swipe-del" data-act="swipeDelTx" data-id="' + esc(t.id) + '">Sil</button></div>' +
+      '<button class="swipe-front tx" data-tx="' + esc(t.id) + '">' + ico +
+        '<div class="tx-body"><div class="tx-name">' + esc(title) + '</div>' +
+        '<div class="tx-note">' + esc(sub) + '</div></div>' +
+        '<div class="tx-amt ' + cls + '">' + Fmt.sgn(eff) + '</div></button></div>';
   }
 
   /* ================= RENDER: KATEGORİ DETAYI ================= */
@@ -635,25 +762,9 @@
 
     var donut = "", legend = "", totalExp = mt.expense;
     if (parts.length) {
-      var acc = 0, circ = 2 * Math.PI * 36;
-      donut = '<svg class="donut" viewBox="0 0 80 80" aria-hidden="true">';
-      parts.forEach(function (p) {
-        var len = (p.amount / totalExp) * circ;
-        donut += '<circle cx="40" cy="40" r="36" fill="none" stroke="' + p.color + '" stroke-width="8" ' +
-          'stroke-dasharray="' + len + " " + (circ - len) + '" stroke-dashoffset="' + (-acc) + '"/>';
-        acc += len;
-      });
-      donut += "</svg>";
-      legend = parts.map(function (p) {
-        var pct = totalExp ? Math.round(p.amount / totalExp * 100) : 0;
-        var open = p.id
-          ? ' type="button" data-act="openCatMonth" data-id="' + esc(p.id) + '" data-month="' + esc(S.month) + '"'
-          : " type=\"button\" disabled";
-        return '<button class="leg"' + open + '>' +
-          '<div class="swatch" style="background:' + p.color + '"></div>' +
-          '<div class="name">' + esc(p.name) + " · " + pct + "%</div>" +
-          '<div class="amt">−' + Fmt.money(p.amount) + "</div></button>";
-      }).join("");
+      var built = donutSvgAndLegend(parts, totalExp, { svgId: "month-donut", act: "openCatMonth", month: S.month });
+      donut = built.svg;
+      legend = built.legend;
     } else {
       donut = '<div class="empty" style="padding:20px 0">Bu ay gider yok</div>';
     }
@@ -801,26 +912,9 @@
       return '<div class="dist"><h2>Yıllık gider dağılımı</h2><div class="empty">Bu yıl gider yok</div></div>';
     }
     var total = yt.expense;
-    var acc = 0, circ = 2 * Math.PI * 36, donut = '<svg class="donut" viewBox="0 0 80 80" aria-hidden="true">';
-    parts.forEach(function (p) {
-      var len = total ? (p.amount / total) * circ : 0;
-      donut += '<circle cx="40" cy="40" r="36" fill="none" stroke="' + p.color + '" stroke-width="8" ' +
-        'stroke-dasharray="' + len + " " + (circ - len) + '" stroke-dashoffset="' + (-acc) + '"/>';
-      acc += len;
-    });
-    donut += "</svg>";
-    var legend = parts.map(function (p) {
-      var pct = total ? Math.round(p.amount / total * 100) : 0;
-      var open = p.id
-        ? ' type="button" data-act="openCatYear" data-id="' + esc(p.id) + '" data-year="' + year + '"'
-        : ' type="button" disabled';
-      return '<button class="leg"' + open + '>' +
-        '<div class="swatch" style="background:' + p.color + '"></div>' +
-        '<div class="name">' + esc(p.name) + " · " + pct + "%</div>" +
-        '<div class="amt">−' + Fmt.money(p.amount) + "</div></button>";
-    }).join("");
-    return '<div class="dist"><h2>Yıllık gider dağılımı</h2><div class="donut-row">' + donut +
-      '<div class="legend">' + legend + "</div></div></div>";
+    var built = donutSvgAndLegend(parts, total, { svgId: "year-donut", act: "openCatYear", year: year });
+    return '<div class="dist"><h2>Yıllık gider dağılımı</h2><div class="donut-row">' + built.svg +
+      '<div class="legend" id="year-legend">' + built.legend + "</div></div></div>";
   }
 
   /* ================= RENDER: AYARLAR ================= */
@@ -1035,16 +1129,41 @@
     el.classList.remove("kb-open");
   }
 
+  function revealFocusedField() {
+    if (!SHT.el || !SHT.el.classList.contains("show")) return;
+    var ae = document.activeElement;
+    if (!ae || !SHT.el.contains(ae)) return;
+    if (!/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return;
+    var scroll = SHT.el.querySelector(".sheet-scroll");
+    setTimeout(function () {
+      try { ae.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }); } catch (e) {
+        if (scroll) {
+          var ar = ae.getBoundingClientRect();
+          var sr = scroll.getBoundingClientRect();
+          if (ar.bottom > sr.bottom - 8 || ar.top < sr.top + 8) {
+            scroll.scrollTop += ar.top - sr.top - Math.max(12, (sr.height - ar.height) / 2);
+          }
+        }
+      }
+    }, 60);
+  }
+
   function hookViewport() {
     if (hookViewport._on) return;
     hookViewport._on = true;
-    function on() { fitSheetToViewport(); }
+    function on() { fitSheetToViewport(); revealFocusedField(); }
     window.addEventListener("resize", on);
     window.addEventListener("hesap-vv-test", on);
     if (window.visualViewport) {
       window.visualViewport.addEventListener("resize", on);
       window.visualViewport.addEventListener("scroll", on);
     }
+    document.addEventListener("focusin", function (e) {
+      if (!SHT.el || !SHT.el.classList.contains("show")) return;
+      if (!SHT.el.contains(e.target)) return;
+      fitSheetToViewport();
+      revealFocusedField();
+    });
   }
 
   function openSheet() {
@@ -1617,15 +1736,158 @@
     var r = remById(id);
     if (!r) return;
     confirmDialog("Hatırlatmayı sil", "Bu hatırlatma silinsin mi?", { okText: "Sil" }).then(function (ok) {
-      if (!ok) return;
+      if (!ok) { closeAllSwipe(); return; }
+      var snap = Object.assign({}, r);
       var tomb = Object.assign({}, r);
       tomb.deleted = true;
       tomb.updatedAt = now();
       DB.putReminder(tomb).then(function () { return loadData(); }).then(function () {
         closeSheet();
         render();
-        toast("Hatırlatma silindi");
+        toast("Hatırlatma silindi", {
+          actionLabel: "Geri al",
+          action: function () { restoreReminder(snap); }
+        });
       });
+    });
+  }
+
+  function restoreReminder(snap) {
+    var rec = Object.assign({}, snap);
+    rec.deleted = false;
+    rec.updatedAt = now();
+    DB.putReminder(rec).then(function () { return loadData(); }).then(function () {
+      render();
+      toast("Geri alındı");
+    });
+  }
+
+  function deleteTxById(id) {
+    var oldRec = null;
+    for (var i = 0; i < S.transactions.length; i++) if (S.transactions[i].id === id) oldRec = S.transactions[i];
+    if (!oldRec) return;
+    confirmDialog("Hareketi sil", "Bu hareket silinsin mi? Bakiyeler buna göre güncellenir.", { okText: "Sil" }).then(function (ok) {
+      if (!ok) { closeAllSwipe(); return; }
+      var snap = Object.assign({}, oldRec);
+      var rec = Object.assign({}, oldRec);
+      rec.deleted = true;
+      rec.updatedAt = now();
+      DB.putTransaction(rec).then(function () { return loadData(); }).then(function () {
+        closeSheet();
+        render();
+        toast("Silindi", {
+          actionLabel: "Geri al",
+          action: function () { restoreTx(snap); }
+        });
+      });
+    });
+  }
+
+  function restoreTx(snap) {
+    var rec = Object.assign({}, snap);
+    rec.deleted = false;
+    rec.updatedAt = now();
+    DB.putTransaction(rec).then(function () { return loadData(); }).then(function () {
+      render();
+      toast("Geri alındı");
+    });
+  }
+
+  var SWIPE_W = 88;
+  function closeAllSwipe(except) {
+    $$(".swipe-row.open").forEach(function (el) {
+      if (el === except) return;
+      el.classList.remove("open");
+      var f = el.querySelector(".swipe-front");
+      if (f) { f.style.transform = ""; f.style.transition = ""; }
+    });
+  }
+  function openSwipe(row) {
+    if (!row) return;
+    closeAllSwipe(row);
+    row.classList.add("open");
+    var f = row.querySelector(".swipe-front");
+    if (f) {
+      f.style.transition = "transform 0.22s cubic-bezier(0.32, 0.72, 0, 1)";
+      f.style.transform = "translateX(-" + SWIPE_W + "px)";
+    }
+  }
+  function bindSwipe() {
+    if (bindSwipe._on) return;
+    bindSwipe._on = true;
+    var startX = 0, startY = 0, dx = 0, dy = 0, row = null, front = null, tracking = false, decided = false, pointerId = null, opened = 0;
+
+    function end() {
+      if (!tracking) return;
+      tracking = false;
+      if (front) {
+        front.style.transition = "transform 0.22s cubic-bezier(0.32, 0.72, 0, 1)";
+        var x = opened + dx;
+        if (decided && (x < -SWIPE_W * 0.4 || dx < -36)) openSwipe(row);
+        else {
+          if (row) row.classList.remove("open");
+          front.style.transform = "";
+        }
+      }
+      row = front = null;
+      decided = false;
+    }
+
+    function down(x, y, target) {
+      if (target.closest && target.closest(".swipe-del")) return false;
+      var t = target.closest && target.closest(".swipe-row");
+      closeAllSwipe(t);
+      if (!t) return false;
+      row = t;
+      front = t.querySelector(".swipe-front");
+      startX = x; startY = y; dx = dy = 0;
+      tracking = true; decided = false;
+      opened = t.classList.contains("open") ? -SWIPE_W : 0;
+      if (front) front.style.transition = "none";
+      return true;
+    }
+
+    function move(x, y, ev) {
+      if (!tracking || !front) return;
+      dx = x - startX; dy = y - startY;
+      if (!decided) {
+        if (Math.abs(dx) + Math.abs(dy) < 8) return;
+        decided = Math.abs(dx) > Math.abs(dy) * 1.15;
+        if (!decided) { tracking = false; front.style.transition = ""; return; }
+      }
+      if (ev && ev.cancelable) ev.preventDefault();
+      var xPos = Math.min(16, Math.max(-SWIPE_W - 24, opened + dx));
+      front.style.transform = "translateX(" + xPos + "px)";
+    }
+
+    document.addEventListener("touchstart", function (e) {
+      var touch = e.changedTouches[0];
+      down(touch.clientX, touch.clientY, e.target);
+    }, { passive: true });
+    document.addEventListener("touchmove", function (e) {
+      if (!tracking) return;
+      var touch = e.changedTouches[0];
+      move(touch.clientX, touch.clientY, e);
+    }, { passive: false });
+    document.addEventListener("touchend", end);
+    document.addEventListener("touchcancel", end);
+
+    document.addEventListener("pointerdown", function (e) {
+      if (e.pointerType === "touch") return;
+      if (!down(e.clientX, e.clientY, e.target)) return;
+      pointerId = e.pointerId;
+    });
+    document.addEventListener("pointermove", function (e) {
+      if (e.pointerType === "touch" || !tracking || e.pointerId !== pointerId) return;
+      move(e.clientX, e.clientY, e);
+    });
+    document.addEventListener("pointerup", function (e) {
+      if (e.pointerType === "touch") return;
+      end();
+    });
+    document.addEventListener("pointercancel", function (e) {
+      if (e.pointerType === "touch") return;
+      end();
     });
   }
 
@@ -2055,6 +2317,14 @@
     var el = ev.target;
     var hit = function (sel) { return el.closest ? el.closest(sel) : null; };
 
+    var swHit = hit(".swipe-row.open");
+    if (swHit && !hit(".swipe-del")) {
+      closeAllSwipe();
+      ev.preventDefault();
+      ev.stopPropagation();
+      return;
+    }
+
     var t = hit("[data-act]");
     if (t) {
       var act = t.getAttribute("data-act");
@@ -2106,7 +2376,8 @@
       if (act === "saveReminder") { saveReminder(); return; }
       if (act === "remOpen") { ev.preventDefault(); completeReminder(t.getAttribute("data-id")); return; }
       if (act === "remIcs") { ev.preventDefault(); ev.stopPropagation(); addReminderToCalendar(t.getAttribute("data-id")); return; }
-      if (act === "delReminder") { deleteReminder(t.getAttribute("data-id")); return; }
+      if (act === "delReminder" || act === "swipeDelRem") { ev.preventDefault(); ev.stopPropagation(); deleteReminder(t.getAttribute("data-id")); return; }
+      if (act === "swipeDelTx") { ev.preventDefault(); ev.stopPropagation(); deleteTxById(t.getAttribute("data-id")); return; }
       if (act === "backup") { doBackup(); return; }
       if (act === "restore") { pickBackup(); return; }
       if (act === "debug") { openDebug(); return; }
@@ -2327,6 +2598,7 @@
         " tema:" + (S.settings.theme || "auto") + " sürüm:" + APP_VERSION +
         " build:" + (S.settings.build || "—"));
       render();
+      bindSwipe();
       startUpdateWatch();
       startDriveSync();
       /* ilk açılış notu (depolama uyarısı) */
@@ -2388,6 +2660,10 @@
     version: APP_VERSION,
     yearTotals: yearTotals,
     monthTotals: monthTotals,
+    pctLabel: pctLabel,
+    assignChartColors: assignChartColors,
+    donutSliceLens: donutSliceLens,
+    isDullColor: isDullColor,
     reminderIcs: function (id) {
       var r = remById(id);
       return r ? reminderIcs(r) : null;

@@ -859,6 +859,7 @@ html[data-theme="dark"] .track > i.out { background: linear-gradient(90deg, #C97
 }
 .dist h2 { font-size: 15px; font-weight: 620; letter-spacing: -0.02em; margin-bottom: 12px; }
 .dist-body { display: flex; align-items: center; gap: 16px; }
+.donut-row { display: flex; align-items: center; gap: 16px; }
 .donut-wrap { position: relative; width: 118px; height: 118px; flex-shrink: 0; }
 .donut { width: 118px; height: 118px; border-radius: 50%; }
 .donut-hole {
@@ -1103,7 +1104,18 @@ html[data-theme="dark"] .track > i.out { background: linear-gradient(90deg, #C97
   text-align: center;
 }
 html[data-theme="dark"] .toast { background: rgba(244, 238, 224, 0.95); color: #1C1915; }
-.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.toast { display: flex; align-items: center; justify-content: center; gap: 12px; }
+.toast-undo {
+  flex-shrink: 0;
+  background: transparent;
+  color: #F0B429;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+  padding: 0 2px;
+}
+html[data-theme="dark"] .toast-undo { color: #8A5A12; }
 
 /* ============ ONAY DİYALOĞU ============ */
 .dialog-wrap {
@@ -1634,6 +1646,56 @@ html[data-theme="dark"] .g-btn { background: #131314; color: #E3E3E3; border-col
   font-size: 13.5px;
 }
 .move-opt.on { border-color: var(--gold); background: var(--gold-soft); }
+
+.leg .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(28, 25, 21, 0.08);
+  display: inline-block;
+}
+
+/* ============ KAYDIRARAK SİL ============ */
+.swipe-row {
+  position: relative;
+  border-radius: 16px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.rems .swipe-row { margin-bottom: 0; }
+.swipe-actions {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 88px;
+  display: flex;
+  z-index: 0;
+}
+.swipe-del {
+  flex: 1;
+  width: 100%;
+  background: linear-gradient(180deg, #F07A72, #E24B42);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 0;
+  border-radius: 0;
+}
+.swipe-front {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  touch-action: pan-y;
+  will-change: transform;
+}
+.swipe-front.tx,
+.swipe-front.rem {
+  margin-bottom: 0;
+  border-radius: 16px;
+}
+.swipe-row.open .swipe-front { /* transform set inline */ }
 
 /* ============ UYARLAMA ============ */
 @media (min-width: 620px) {
