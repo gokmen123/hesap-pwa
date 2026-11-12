@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "0.3.6";
+  var APP_VERSION = "0.3.7";
 
   /* ================= İKONLAR (yerleşik SVG kümesi) ================= */
   var ICONS = {
@@ -607,7 +607,10 @@
         '<div class="brand"><div class="brand-mark">' +
           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 6v12M17 6v12M7 12h10"/></svg>' +
         '</div><div class="brand-name">Hesap</div></div>' +
-        '<button class="icon-btn" data-act="settings" aria-label="Ayarlar">' + svg("gear") + '</button>' +
+        '<div class="topbar-right">' +
+          ((window.DriveSync && DriveSync.configured()) ? '<span id="sync-dot-wrap">' + DriveSync.dotHtml() + '</span>' : '') +
+          '<button class="icon-btn" data-act="settings" aria-label="Ayarlar">' + svg("gear") + '</button>' +
+        '</div>' +
       '</div>' +
 
       '<div class="hero">' +
@@ -1891,39 +1894,56 @@
     });
   }
 
-  function completeReminder(id) {
+  function openReminderActionSheet(id) {
     var r = remById(id);
     if (!r) return;
-    confirmDialog("Hareket olarak kaydet?",
-      "Bu hatırlatma bakiyeye işlensin mi?",
-      { okText: "Evet", cancelText: "Hayır", danger: false }).then(function (asTx) {
-      closeDialog();
-      var jobs = [];
-      var when = now();
-      if (asTx) {
-        var typ = r.type === "receive" ? "income" : "expense";
-        jobs.push(DB.putTransaction({
-          id: uid(), type: typ, amount: r.amount, categoryId: r.categoryId || null,
-          note: r.note || (r.type === "receive" ? "Ödeme alındı" : "Ödeme yapıldı"),
-          date: r.date || Fmt.todayYMD(), createdAt: when, updatedAt: when
-        }));
-      }
-      var rec = Object.assign({}, r);
-      rec.updatedAt = when;
-      rec.lastDoneDate = r.date;
-      if (r.repeat === "monthly") {
-        rec.date = addMonthsYMD(r.date, 1);
-        rec.done = false;
-        rec.doneAt = null;
-      } else {
-        rec.done = true;
-        rec.doneAt = when;
-      }
-      jobs.push(DB.putReminder(rec));
-      Promise.all(jobs).then(function () { return loadData(); }).then(function () {
-        render();
-        toast(asTx ? "Hareket kaydedildi" : (r.repeat === "monthly" ? "Sonraki aya alındı" : "Tamamlandı"));
-      });
+    S.remActionId = id;
+    var typ = r.type === "receive" ? "Ödeme al" : "Ödeme yap";
+    var payLabel = r.type === "receive" ? "Alındı – hesaba işle" : "Ödendi – hesaba işle";
+    var title = typ + (r.note ? " — " + r.note : "");
+    SHT.body.innerHTML =
+      '<div class="sheet-pin" id="rem-action-sheet">' +
+        '<div class="sheet-title">Hatırlatma</div>' +
+        '<div class="sheet-sub">' + esc(title) + "<br>" + Fmt.money(r.amount) + " TL · " + esc(Fmt.fullDate(r.date)) + "</div>" +
+      "</div>" +
+      '<div class="sheet-scroll rem-action-btns">' +
+        '<button class="save-btn" id="rem-post" data-act="remPost" data-id="' + esc(r.id) + '">' + esc(payLabel) + "</button>" +
+        '<button class="ghost-btn strong" id="rem-done" data-act="remDone" data-id="' + esc(r.id) + '">Tamamlandı (işlemeden)</button>' +
+        '<button class="ghost-btn" id="rem-cancel" data-act="cancel">Vazgeç</button>' +
+      "</div>";
+    openSheet();
+    requestAnimationFrame(fitSheetToViewport);
+  }
+
+  function finishReminder(id, asTx) {
+    var r = remById(id);
+    if (!r) { closeSheet(); return; }
+    var jobs = [];
+    var when = now();
+    if (asTx) {
+      var typ = r.type === "receive" ? "income" : "expense";
+      jobs.push(DB.putTransaction({
+        id: uid(), type: typ, amount: r.amount, categoryId: r.categoryId || null,
+        note: r.note || (r.type === "receive" ? "Ödeme alındı" : "Ödeme yapıldı"),
+        date: r.date || Fmt.todayYMD(), createdAt: when, updatedAt: when
+      }));
+    }
+    var rec = Object.assign({}, r);
+    rec.updatedAt = when;
+    rec.lastDoneDate = r.date;
+    if (r.repeat === "monthly") {
+      rec.date = addMonthsYMD(r.date, 1);
+      rec.done = false;
+      rec.doneAt = null;
+    } else {
+      rec.done = true;
+      rec.doneAt = when;
+    }
+    jobs.push(DB.putReminder(rec));
+    Promise.all(jobs).then(function () { return loadData(); }).then(function () {
+      closeSheet();
+      render();
+      toast(asTx ? "Hareket kaydedildi" : (r.repeat === "monthly" ? "Sonraki aya alındı" : "Tamamlandı"));
     });
   }
 
@@ -2374,7 +2394,9 @@
       if (act === "cancel") { closeSheet(); return; }
       if (act === "newReminder") { openReminderSheet(null); return; }
       if (act === "saveReminder") { saveReminder(); return; }
-      if (act === "remOpen") { ev.preventDefault(); completeReminder(t.getAttribute("data-id")); return; }
+      if (act === "remOpen") { ev.preventDefault(); openReminderActionSheet(t.getAttribute("data-id")); return; }
+      if (act === "remPost") { ev.preventDefault(); finishReminder(t.getAttribute("data-id") || S.remActionId, true); return; }
+      if (act === "remDone") { ev.preventDefault(); finishReminder(t.getAttribute("data-id") || S.remActionId, false); return; }
       if (act === "remIcs") { ev.preventDefault(); ev.stopPropagation(); addReminderToCalendar(t.getAttribute("data-id")); return; }
       if (act === "delReminder" || act === "swipeDelRem") { ev.preventDefault(); ev.stopPropagation(); deleteReminder(t.getAttribute("data-id")); return; }
       if (act === "swipeDelTx") { ev.preventDefault(); ev.stopPropagation(); deleteTxById(t.getAttribute("data-id")); return; }
