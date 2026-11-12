@@ -1,4 +1,4 @@
-# Hesap — 0.3.1
+# Hesap — 0.3.2
 
 Kişisel para takibi PWA'sı. Kategorilere ayrılmış gelir/gider, her zaman üstte duran toplam bakiye, aylık özet.
 
@@ -64,9 +64,9 @@ Ayarlar → **Yedek al** tek JSON dosyası üretir (Web Share, desteklenmiyorsa 
 
 > iPhone notu: Safari sekmesi ile ana ekrana eklenen uygulama ayrı depolama kullanır. Birinde girilen hareket diğerinde görünmez. Bu yüzden yedek önemli.
 
-## Drive yedeği (0.3.0)
+## Drive yedeği (0.3.2)
 
-Telefondaki IndexedDB her zaman asıl kopyadır; uygulama çevrimdışı tam çalışır. Drive bir yedek/eşitleme hedefidir. **Her kullanıcı kendi Google hesabıyla bağlanır**, yedek o kullanıcının Drive'ında `Hesap/hesap_yedek.json` olarak durur.
+Telefondaki IndexedDB her zaman asıl kopyadır; yazmalar önce telefona gider, uygulama çevrimdışı tam çalışır. 0.3.2'den itibaren internet varken açılışta Drive'dan otomatik çekilir, değişiklikler sormadan geri gönderir (otomatik eşitleme varsayılan açık). Çakışmada kayıtlar id + updatedAt ile birleştirilir. Drive bir yedek/eşitleme hedefidir. **Her kullanıcı kendi Google hesabıyla bağlanır**, yedek o kullanıcının Drive'ında `Hesap/hesap_yedek.json` olarak durur.
 
 - **Yapılandırma:** `js/config.js` → `GOOGLE_CLIENT_ID` (Google Cloud OAuth 2.0 *Web* istemci kimliği; gizli değil). Boşsa Drive özelliği tamamen kapalıdır, hiçbir istek atılmaz, eski ilk açılış notu gösterilir. Kurulum adımları: repo dışında `GOOGLE_KURULUM.md`.
 - **Kapsam:** `https://www.googleapis.com/auth/drive.file` — hassas olmayan kapsam (doğrulama gerekmez); uygulama yalnızca kendi oluşturduğu dosyaları görür. `drive.appdata` yerine seçildi çünkü kullanıcı yedeği Drive'ında görebilmeli (gizli klasör değil).
@@ -92,4 +92,4 @@ Service worker her varlığı **network-first** getirir (6 sn zaman aşımı; a�
 
 ## Sürüm
 
-`0.3.1`. Uygulama sürümü `js/app.js` içindeki `APP_VERSION`; sürüm damgası `version.json`.
+`0.3.2`. Uygulama sürümü `js/app.js` içindeki `APP_VERSION`; sürüm damgası `version.json`.
