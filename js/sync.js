@@ -281,11 +281,13 @@ window.DriveSync = (function () {
   function metaFromFile(f) {
     var ap = (f && f.appProperties) || {};
     var rev = Number(ap.rev || 0);
+    var apAt = Number(ap.at || 0);
+    var mod = (f && f.modifiedTime) ? Date.parse(f.modifiedTime) : 0;
     return {
       exists: !!f && rev > 0,
       rev: rev,
       hash: ap.hash || null,
-      updatedAt: Number(ap.at || 0) || (f && f.modifiedTime ? Date.parse(f.modifiedTime) : 0),
+      updatedAt: Math.max(apAt || 0, mod || 0),
       device: ap.device || null,
       summary: ap.tx != null ? { tx: Number(ap.tx), balance: Number(ap.bal || 0), lastDate: ap.last || null } : null,
       fileId: f ? f.id : null
@@ -531,6 +533,8 @@ window.DriveSync = (function () {
     if (meta.hash && meta.hash === localHash) return "same";
     if (st.rev == null) return localEmpty() ? "pull" : "merge";
     var rChanged = meta.rev !== st.rev;
+    /* Uygulama dışı yazımda appProperties.rev aynı kalabilir; modifiedTime yeniyse çek. */
+    if (!rChanged && meta.updatedAt && st.remoteUpdatedAt && meta.updatedAt > st.remoteUpdatedAt + 2000) rChanged = true;
     var lChanged = localHash !== st.hash;
     if (rChanged && lChanged) return "merge";
     if (rChanged) return "pull";

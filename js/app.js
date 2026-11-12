@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "0.3.7";
+  var APP_VERSION = "0.3.8";
 
   /* ================= İKONLAR (yerleşik SVG kümesi) ================= */
   var ICONS = {
@@ -463,7 +463,7 @@
     toast._t = setTimeout(function () { el.classList.remove("show"); toast._undo = null; }, opts.hold || (opts.action ? 5000 : 2200));
   }
 
-  var dlgResolve = null;
+  var dlgResolve, dlgOnConfirm = null;
   function confirmDialog(title, body, opts) {
     opts = opts || {};
     var wrap = $("#dialog");
@@ -476,12 +476,14 @@
     var cancel = $("#dlg-cancel");
     if (cancel) cancel.textContent = opts.cancelText || "Vazgeç";
     wrap.classList.add("show");
+    dlgOnConfirm = (opts && typeof opts.onConfirm === "function") ? opts.onConfirm : null;
     return new Promise(function (res) {
       dlgResolve = res;
     });
   }
   function closeDialog(val) {
     $("#dialog").classList.remove("show");
+    dlgOnConfirm = null;
     if (dlgResolve) { var r = dlgResolve; dlgResolve = null; r(val); }
   }
 
@@ -541,7 +543,10 @@
     var list = liveReminders();
     var rows = list.filter(function (r) { return !reminderIsDone(r); });
     var html = '<div class="sec-head"><div class="sec-title">Hatırlatmalar</div>' +
-      '<button class="sec-action" data-act="newReminder">Ekle</button></div>';
+      '<div class="sec-actions">' +
+        (rows.length ? '<button type="button" class="sec-action" id="rems-ics-all" data-act="remsIcsAll">Tümünü takvime ekle</button>' : '') +
+        '<button class="sec-action" data-act="newReminder">Ekle</button>' +
+      '</div></div>';
     if (!rows.length) {
       return html + '<div class="empty"><strong>Hatırlatma yok</strong>Ödeme tarihi gelenleri burada görebilirsin.</div>';
     }
@@ -1725,12 +1730,15 @@
         createdAt: t, updatedAt: t
       };
     }
+    var wasNew = !remForm.id;
+    var oldRec = wasNew ? null : remById(remForm.id);
+    if (wasNew || reminderCalChanged(oldRec, rec)) publishReminderToCalendar(rec, !wasNew);
     DB.putReminder(rec).then(function (ok) {
       if (!ok) { formError("Kaydedilemedi, tekrar dene."); return; }
       return loadData().then(function () {
         closeSheet();
         render();
-        toast(remForm.id ? "Hatırlatma güncellendi" : "Hatırlatma eklendi");
+        toast(wasNew ? "Hatırlatma eklendi. Takvimde Ekle'ye dokun." : (reminderCalChanged(oldRec, rec) ? "Hatırlatma güncellendi. Takvimde Ekle'ye dokun." : "Hatırlatma güncellendi"));
       });
     });
   }
@@ -1738,7 +1746,10 @@
   function deleteReminder(id) {
     var r = remById(id);
     if (!r) return;
-    confirmDialog("Hatırlatmayı sil", "Bu hatırlatma silinsin mi?", { okText: "Sil" }).then(function (ok) {
+    confirmDialog("Hatırlatmayı sil", "Bu hatırlatma silinsin mi?", {
+      okText: "Sil",
+      onConfirm: function () { cancelReminderOnCalendar(r); }
+    }).then(function (ok) {
       if (!ok) { closeAllSwipe(); return; }
       var snap = Object.assign({}, r);
       var tomb = Object.assign({}, r);
@@ -1918,6 +1929,8 @@
   function finishReminder(id, asTx) {
     var r = remById(id);
     if (!r) { closeSheet(); return; }
+    /* Aylık hatırlatma tamamlanınca seri durmaz; tek seferlikte takvimden kaldır. */
+    if (r.repeat !== "monthly") cancelReminderOnCalendar(r);
     var jobs = [];
     var when = now();
     if (asTx) {
@@ -1947,58 +1960,120 @@
     });
   }
 
-  function reminderIcs(r) {
+  function icsEsc(s) {
+    return String(s || "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+  }
+  function reminderCalUid(r) { return "hesap-rem-" + r.id + "@hesap"; }
+  function reminderCalTitle(r) {
     var title = (r.type === "receive" ? "Ödeme al" : "Ödeme yap") + ": " + Fmt.money(r.amount) + " TL";
     var cat = r.categoryId ? catById(r.categoryId) : null;
     if (cat) title += " (" + cat.name + ")";
     if (r.note) title += " — " + r.note;
-    function icsEsc(s) { return String(s || "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n"); }
-    var uid = "hesap-rem-" + r.id + "@hesap";
-    var stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    return title;
+  }
+  function icsSequence(r, extra) {
+    return Math.floor((Number(r && r.updatedAt) || Date.now()) / 1000) + (extra || 0);
+  }
+  function icsStamp() {
+    return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  }
+  function reminderVEvent(r, opts) {
+    opts = opts || {};
+    var cancel = !!opts.cancel;
+    var title = reminderCalTitle(r);
+    var uid = reminderCalUid(r);
     var day = String(r.date).replace(/-/g, "");
     var start = day + "T090000";
     var end = day + "T093000";
-    return [
+    var seq = icsSequence(r, (cancel || opts.bump) ? 1 : 0);
+    var lines = [
+      "BEGIN:VEVENT",
+      "UID:" + uid,
+      "DTSTAMP:" + icsStamp(),
+      "DTSTART:" + start,
+      "DTEND:" + end,
+      "SEQUENCE:" + seq,
+      "SUMMARY:" + icsEsc(title)
+    ];
+    if (cancel) {
+      lines.push("STATUS:CANCELLED");
+    } else {
+      lines.push("DESCRIPTION:" + icsEsc(r.note || ""));
+      if (r.repeat === "monthly") {
+        var md = Number(String(r.date).slice(8, 10)) || 1;
+        lines.push("RRULE:FREQ=MONTHLY;BYMONTHDAY=" + md);
+      }
+      lines.push("BEGIN:VALARM");
+      lines.push("ACTION:DISPLAY");
+      lines.push("TRIGGER:-P1D");
+      lines.push("DESCRIPTION:" + icsEsc(title));
+      lines.push("END:VALARM");
+      lines.push("BEGIN:VALARM");
+      lines.push("ACTION:DISPLAY");
+      lines.push("TRIGGER:PT0S");
+      lines.push("DESCRIPTION:" + icsEsc(title));
+      lines.push("END:VALARM");
+    }
+    lines.push("END:VEVENT");
+    return lines;
+  }
+  function buildCalendarIcs(rems, opts) {
+    opts = opts || {};
+    var cancel = !!opts.cancel;
+    var lines = [
       "BEGIN:VCALENDAR",
       "VERSION:2.0",
       "PRODID:-//Hesap//TR",
       "CALSCALE:GREGORIAN",
-      "BEGIN:VEVENT",
-      "UID:" + uid,
-      "DTSTAMP:" + stamp,
-      "DTSTART:" + start,
-      "DTEND:" + end,
-      "SUMMARY:" + icsEsc(title),
-      "DESCRIPTION:" + icsEsc(r.note || ""),
-      "BEGIN:VALARM",
-      "ACTION:DISPLAY",
-      "TRIGGER:-P1D",
-      "DESCRIPTION:" + icsEsc(title),
-      "END:VALARM",
-      "BEGIN:VALARM",
-      "ACTION:DISPLAY",
-      "TRIGGER:PT0S",
-      "DESCRIPTION:" + icsEsc(title),
-      "END:VALARM",
-      "END:VEVENT",
-      "END:VCALENDAR"
-    ].join("\r\n");
+      "METHOD:" + (cancel ? "CANCEL" : "PUBLISH")
+    ];
+    (rems || []).forEach(function (r) {
+      lines = lines.concat(reminderVEvent(r, opts));
+    });
+    lines.push("END:VCALENDAR");
+    return lines.join("\r\n") + "\r\n";
   }
-
-  function addReminderToCalendar(id) {
-    var r = remById(id);
-    if (!r) return;
-    var ics = reminderIcs(r);
+  function reminderIcs(r, opts) { return buildCalendarIcs([r], opts); }
+  function openIcsFile(ics, filename) {
+    try { window.__hesapLastIcs = { ics: ics, filename: filename || "hesap.ics", at: Date.now() }; } catch (e) {}
     var blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
     a.href = url;
-    a.download = "hesap-hatirlatma-" + String(r.date).replace(/-/g, "") + ".ics";
+    a.download = filename || "hesap-hatirlatma.ics";
+    a.type = "text/calendar";
     document.body.appendChild(a);
     a.click();
     setTimeout(function () { URL.revokeObjectURL(url); if (a.parentNode) a.parentNode.removeChild(a); }, 2000);
-    toast("Takvim dosyası açıldı");
     return ics;
+  }
+  function addReminderToCalendar(id) {
+    var r = remById(id);
+    if (!r) return;
+    var ics = reminderIcs(r);
+    openIcsFile(ics, "hesap-hatirlatma-" + String(r.date).replace(/-/g, "") + ".ics");
+    return ics;
+  }
+  function addAllRemindersToCalendar() {
+    var rows = liveReminders().filter(function (r) { return !reminderIsDone(r); });
+    if (!rows.length) { toast("Eklenecek hatırlatma yok"); return; }
+    var ics = buildCalendarIcs(rows);
+    openIcsFile(ics, "hesap-hatirlatmalar.ics");
+    return ics;
+  }
+  function publishReminderToCalendar(r, isEdit) {
+    if (!r || r.done || r.deleted) return;
+    openIcsFile(reminderIcs(r, { bump: !!isEdit }), "hesap-hatirlatma-" + String(r.date).replace(/-/g, "") + ".ics");
+  }
+  function cancelReminderOnCalendar(r) {
+    if (!r) return;
+    openIcsFile(reminderIcs(r, { cancel: true }), "hesap-hatirlatma-iptal-" + String(r.date).replace(/-/g, "") + ".ics");
+  }
+  function reminderCalChanged(old, rec) {
+    if (!old) return true;
+    return old.date !== rec.date || old.amount !== rec.amount || old.type !== rec.type ||
+      (old.note || "") !== (rec.note || "") || (old.categoryId || null) !== (rec.categoryId || null) ||
+      (old.repeat || null) !== (rec.repeat || null);
   }
 
   /* ================= YEDEK ================= */
@@ -2397,6 +2472,7 @@
       if (act === "remOpen") { ev.preventDefault(); openReminderActionSheet(t.getAttribute("data-id")); return; }
       if (act === "remPost") { ev.preventDefault(); finishReminder(t.getAttribute("data-id") || S.remActionId, true); return; }
       if (act === "remDone") { ev.preventDefault(); finishReminder(t.getAttribute("data-id") || S.remActionId, false); return; }
+      if (act === "remsIcsAll") { ev.preventDefault(); ev.stopPropagation(); addAllRemindersToCalendar(); return; }
       if (act === "remIcs") { ev.preventDefault(); ev.stopPropagation(); addReminderToCalendar(t.getAttribute("data-id")); return; }
       if (act === "delReminder" || act === "swipeDelRem") { ev.preventDefault(); ev.stopPropagation(); deleteReminder(t.getAttribute("data-id")); return; }
       if (act === "swipeDelTx") { ev.preventDefault(); ev.stopPropagation(); deleteTxById(t.getAttribute("data-id")); return; }
@@ -2453,7 +2529,13 @@
     if (hit("#backdrop") || hit("#sheet-close")) { closeSheet(); return; }
     if (hit("#debug-close")) { closeDebug(); return; }
     if (hit("#dlg-cancel")) { closeDialog(false); return; }
-    if (hit("#dlg-ok")) { closeDialog(true); return; }
+    if (hit("#dlg-ok")) {
+      var conf = dlgOnConfirm;
+      dlgOnConfirm = null;
+      if (typeof conf === "function") { try { conf(); } catch (e) {} }
+      closeDialog(true);
+      return;
+    }
     if (hit("#debug-copy")) {
       var txt = DB.getLogs().map(function (l) {
         var d = new Date(l.t);
@@ -2602,6 +2684,27 @@
   }
 
   /* ================= AÇILIŞ ================= */
+  /* 0.3.7 göçü yerel (tamamlanmış) kopyayı yazdı; 8 Ara kaydı yanlışlıkla done kaldı.
+     Yalnızca o eski tamamlanma damgası eşleşirse bir kez açılır. Sonradan gerçek tamamlamaya dokunulmaz. */
+  var STALE_REM_ID = "a2c9a852-b953-4af4-b5ac-67a1460c25b7";
+  var STALE_REM_DONE_AT = 1794476755794;
+  function maybeRepairStaleReminder() {
+    var r = remById(STALE_REM_ID);
+    if (!r || !r.done || r.deleted) return Promise.resolve(false);
+    if (Number(r.doneAt) !== STALE_REM_DONE_AT) return Promise.resolve(false);
+    if (r.date !== "2026-12-08" || Number(r.amount) !== 85700) return Promise.resolve(false);
+    var rec = Object.assign({}, r);
+    rec.done = false;
+    rec.doneAt = null;
+    rec.lastDoneDate = null;
+    rec.updatedAt = now();
+    return DB.putReminder(rec).then(function (ok) {
+      if (!ok) return false;
+      DB.log("HATIRLATMA", "8 Ara kaydı yeniden açıldı (eski tamamlanma geri alındı)");
+      return loadData().then(function () { return true; });
+    });
+  }
+
   function boot() {
     DB.open().then(function () {
       return loadData();
@@ -2610,6 +2713,8 @@
       return seedIfEmpty();
     }).then(function () {
       return loadData();
+    }).then(function () {
+      return maybeRepairStaleReminder();
     }).then(function () {
       /* depolama sağlığı: önce oku, izin yoksa ana ekranda tekrar iste */
       return checkStorageHealth();
@@ -2686,10 +2791,15 @@
     assignChartColors: assignChartColors,
     donutSliceLens: donutSliceLens,
     isDullColor: isDullColor,
-    reminderIcs: function (id) {
+    reminderIcs: function (id, opts) {
       var r = remById(id);
-      return r ? reminderIcs(r) : null;
+      return r ? reminderIcs(r, opts) : null;
     },
+    remindersIcs: function () {
+      var rows = liveReminders().filter(function (r) { return !reminderIsDone(r); });
+      return buildCalendarIcs(rows);
+    },
+    lastIcs: function () { return window.__hesapLastIcs || null; },
     state: function () { return S; }
   };
 
