@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "0.2.2";
+  var APP_VERSION = "0.3.0";
 
   /* ================= İKONLAR (yerleşik SVG kümesi) ================= */
   var ICONS = {
@@ -410,7 +410,9 @@
 
       '<div class="sec-head"><div class="sec-title">Kategoriler</div>' +
         '<button class="sec-action" data-act="manage">Düzenle</button></div>' +
-      backupBannerHtml() +
+      (window.DriveSync && DriveSync.configured()
+        ? '<div id="drv-slot">' + DriveSync.bannerHtml() + '</div>'
+        : backupBannerHtml()) +
       '<div class="cats">' + catsHtml + '</div>' +
 
       '<div class="sec-head"><div class="sec-title">Son hareketler</div></div>' +
@@ -622,7 +624,9 @@
         '</div>' +
       '</div></div>' +
 
-      '<div class="sec-head"><div class="sec-title">Yedek</div></div>' +
+      (window.DriveSync ? DriveSync.settingsHtml() : '') +
+
+      '<div class="sec-head"><div class="sec-title">Dosya yedeği</div></div>' +
       '<div class="set-group">' +
         '<div class="set-row col">' +
           '<div><div class="k">Yedek hedefi</div><div class="d">' + esc(backupTargetHint()) + '</div></div>' +
@@ -670,7 +674,9 @@
       '<div class="about">' +
         '<div class="app-name">Hesap</div>' +
         '<button class="ver" data-act="debug">v' + APP_VERSION + '</button>' +
-        '<div class="tiny">Veriler yalnızca bu cihazda saklanır.</div>' +
+        '<div class="tiny">' + (window.DriveSync && DriveSync.configured()
+          ? "Veriler bu cihazda saklanır, Google Drive'a yedeklenir."
+          : "Veriler yalnızca bu cihazda saklanır.") + '</div>' +
       '</div>';
 
     $("#view-settings").classList.add("no-dock");
@@ -1214,34 +1220,17 @@
     inp.click();
   }
 
-  function handleImportText(txt) {
-    var data;
-    try { data = JSON.parse(txt); }
-    catch (e) {
-      DB.log("YEDEK", "bozuk JSON: " + (e && e.message ? e.message : e));
-      confirmDialog("Yedek yüklenemedi", "Dosya geçerli JSON değil. Hata: " + esc(e && e.message ? e.message : "bilinmiyor"),
-        { okText: "Tamam", danger: false }).then(closeDialog);
-      return;
-    }
+  /* yedek nesnesini doğrula ve temizle — dosyadan yüklemede ve Drive'dan çekmede ortak */
+  function normalizeBackup(data) {
     if (!data || data.app !== "hesap" || typeof data.format !== "number") {
-      DB.log("YEDEK", "tanınmayan dosya");
-      confirmDialog("Yedek yüklenemedi", "Bu dosya bir Hesap yedeği değil (<code>app: \"hesap\"</code> bulunamadı).",
-        { okText: "Tamam", danger: false }).then(closeDialog);
-      return;
+      return { error: "Bu dosya bir Hesap yedeği değil (<code>app: \"hesap\"</code> bulunamadı).", code: "app" };
     }
     if (data.format > 1) {
-      DB.log("YEDEK", "desteklenmeyen format: " + data.format);
-      confirmDialog("Yedek yüklenemedi", "Bu yedek daha yeni bir sürümle alınmış (format " + esc(data.format) +
-        "). Uygulamayı güncelle.", { okText: "Tamam", danger: false }).then(closeDialog);
-      return;
+      return { error: "Bu yedek daha yeni bir sürümle alınmış (format " + esc(data.format) + "). Uygulamayı güncelle.", code: "format" };
     }
     if (!Array.isArray(data.categories) || !Array.isArray(data.transactions)) {
-      DB.log("YEDEK", "eksik diziler");
-      confirmDialog("Yedek yüklenemedi", "Dosyada <code>categories</code> veya <code>transactions</code> listesi yok.",
-        { okText: "Tamam", danger: false }).then(closeDialog);
-      return;
+      return { error: "Dosyada <code>categories</code> veya <code>transactions</code> listesi yok.", code: "arrays" };
     }
-
     var cats = [], txs = [], bad = 0, t = now();
     data.categories.forEach(function (c) {
       if (!c || !c.id || typeof c.name !== "string") { bad++; return; }
@@ -1272,6 +1261,37 @@
       if (x.type === "adjust") rec.adjustSign = x.adjustSign === -1 ? -1 : 1;
       txs.push(rec);
     });
+    var theme = (data.settings && ["auto", "light", "dark"].indexOf(data.settings.theme) >= 0) ? data.settings.theme : (S.settings.theme || "auto");
+    return { cats: cats, txs: txs, bad: bad, theme: theme };
+  }
+
+  /* tüm veriyi değiştir, yeniden yükle, çiz */
+  function replaceData(cats, txs, theme) {
+    return DB.replaceAll(cats, txs, { theme: theme || S.settings.theme || "auto", schemaVersion: 1 }).then(function () {
+      return loadData();
+    }).then(function () {
+      applyTheme();
+      render();
+      return true;
+    });
+  }
+
+  function handleImportText(txt) {
+    var data;
+    try { data = JSON.parse(txt); }
+    catch (e) {
+      DB.log("YEDEK", "bozuk JSON: " + (e && e.message ? e.message : e));
+      confirmDialog("Yedek yüklenemedi", "Dosya geçerli JSON değil. Hata: " + esc(e && e.message ? e.message : "bilinmiyor"),
+        { okText: "Tamam", danger: false }).then(closeDialog);
+      return;
+    }
+    var n = normalizeBackup(data);
+    if (n.error) {
+      DB.log("YEDEK", "yüklenemedi: " + n.code);
+      confirmDialog("Yedek yüklenemedi", n.error, { okText: "Tamam", danger: false }).then(closeDialog);
+      return;
+    }
+    var cats = n.cats, txs = n.txs, bad = n.bad;
 
     var msg = "Bu işlem mevcut <strong>" + S.categories.length + " kategori</strong> ve <strong>" +
       S.transactions.length + " hareket</strong> kaydının üzerine yazacak.<br><br>" +
@@ -1280,12 +1300,7 @@
 
     confirmDialog("Yedeği yükle", msg, { okText: "Üzerine yaz" }).then(function (ok) {
       if (!ok) return;
-      var set = { theme: (data.settings && ["auto", "light", "dark"].indexOf(data.settings.theme) >= 0) ? data.settings.theme : (S.settings.theme || "auto"), schemaVersion: 1 };
-      DB.replaceAll(cats, txs, set).then(function () {
-        return loadData();
-      }).then(function () {
-        applyTheme();
-        render();
+      replaceData(cats, txs, n.theme).then(function () {
         DB.log("YEDEK", "içe aktarıldı: " + cats.length + " kategori, " + txs.length + " hareket" + (bad ? ", " + bad + " atlandı" : ""));
         toast("Yedek yüklendi");
       }).catch(function (e) {
@@ -1330,6 +1345,7 @@
       S.settings.seenIntro = st.seenIntro === true;
       if (st.build) S.settings.build = st.build;
       if (st.backupTarget) S.settings.backupTarget = st.backupTarget;
+      if (window.DriveSync) DriveSync.onLocalChange();
       return true;
     });
   }
@@ -1447,6 +1463,8 @@
   document.addEventListener("keydown", function (ev) {
     if (ev.key === "Escape") {
       if ($("#dialog").classList.contains("show")) { closeDialog(null); return; }
+      var ds = $("#drv-sheet");
+      if (ds && ds.classList.contains("show")) { var lb = ds.querySelector('[data-drv="later"]'); if (lb) lb.click(); return; }
       if ($("#debug-panel").classList.contains("show")) { closeDebug(); return; }
       if ($("#sheet").classList.contains("show")) { closeSheet(); return; }
     }
@@ -1526,6 +1544,27 @@
     }
   }
 
+  /* ================= DRIVE EŞİTLEME ================= */
+  function startDriveSync() {
+    if (!window.DriveSync) return;
+    DriveSync.init({
+      version: APP_VERSION,
+      state: function () { return S; },
+      buildBackup: buildBackup,
+      normalize: normalizeBackup,
+      replaceData: replaceData,
+      toast: toast,
+      esc: esc,
+      go: go,
+      standalone: isStandalone,
+      confirm: function (title, body, opts) {
+        return confirmDialog(title, body, opts).then(function (v) { closeDialog(); return v; });
+      }
+    }).catch(function (e) {
+      DB.log("DRIVE", "başlatılamadı: " + (e && e.message ? e.message : e));
+    });
+  }
+
   /* ================= AÇILIŞ ================= */
   function boot() {
     DB.open().then(function () {
@@ -1545,6 +1584,7 @@
         " build:" + (S.settings.build || "—"));
       render();
       startUpdateWatch();
+      startDriveSync();
       /* ilk açılış notu (depolama uyarısı) */
       if (!S.settings.seenIntro) {
         DB.setSetting("seenIntro", true);
@@ -1583,6 +1623,7 @@
   window.HesapDebug = {
     counts: function () { return DB.counts(); },
     dump: buildBackup,
+    drive: function () { return window.DriveSync ? DriveSync._state() : null; },
     version: APP_VERSION
   };
 
