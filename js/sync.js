@@ -1,4 +1,4 @@
-/* Hesap — Google Drive eşitleme (0.3.2)
+/* Hesap — Google Drive eşitleme (0.3.3)
    Telefondaki IndexedDB her zaman asıl kopyadır (yazmalar önce buraya).
    Açılışta, bağlanınca ve internet gelince: çevrimiçiyken Drive'dan
    Hesap/hesap_yedek.json ÖNCE çekilir (soru yok); üzerine yazmadan önce
@@ -7,14 +7,19 @@
    Çakışma: kayıt id + updatedAt ile birleştirilir, kayıt sessizce kaybolmaz;
    birleşemezse (bozuk dosya vb.) ancak o zaman soru sayfası çıkar.
    Otomatik eşitleme varsayılan açık.
-   Her kullanıcı kendi Google hesabıyla bağlanır (OAuth tam sayfa yönlendirme,
-   drive.file). config.js'de GOOGLE_CLIENT_ID yoksa bu modül hiçbir şey yapmaz. */
+   Uygulama dosyası görünmüyorsa bir kez ek kapsam (`drive`) istenir
+   (artırımlı izin, include_granted_scopes); onaydan sonra ada göre yedek
+   bulunur, çekilir ve aynı dosyaya yazılır. Reddedilirse sormaya devam etmez.
+   Boş yerel, dolu Drive'ın üzerine yazılmaz.
+   Her kullanıcı kendi Google hesabıyla bağlanır (OAuth tam sayfa yönlendirme).
+   config.js'de GOOGLE_CLIENT_ID yoksa bu modül hiçbir şey yapmaz. */
 window.DriveSync = (function () {
   "use strict";
 
   var C = window.HESAP_CONFIG || {};
   var CLIENT_ID = C.GOOGLE_CLIENT_ID || "";
   var SCOPE = C.DRIVE_SCOPE || "https://www.googleapis.com/auth/drive.file";
+  var ADOPT_SCOPE = C.ADOPT_SCOPE || "https://www.googleapis.com/auth/drive";
   var AUTH_URL = C.AUTH_URL || "https://accounts.google.com/o/oauth2/v2/auth";
   var REVOKE_URL = C.REVOKE_URL || "https://oauth2.googleapis.com/revoke";
   var API = C.DRIVE_API || "https://www.googleapis.com";
@@ -84,7 +89,8 @@ window.DriveSync = (function () {
   function saveCfg() {
     return DB.setSetting("drive", cfg ? {
       connected: !!cfg.connected, email: cfg.email || null, name: cfg.name || null,
-      auto: cfg.auto !== false, autoOnDefault: true
+      auto: cfg.auto !== false, autoOnDefault: true,
+      wideScope: !!cfg.wideScope, adoptDenied: !!cfg.adoptDenied
     } : null);
   }
   function saveTok() { return DB.setSetting("driveToken", tok); }
@@ -103,25 +109,41 @@ window.DriveSync = (function () {
     return Array.prototype.map.call(a, function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
   }
 
-  function startAuth(intent, silent) {
+  function scopeList(wantAdopt) {
+    var parts = [SCOPE];
+    if (wantAdopt || (cfg && cfg.wideScope)) parts.push(ADOPT_SCOPE);
+    var seen = {}, out = [];
+    parts.forEach(function (sc) {
+      String(sc || "").split(/\s+/).forEach(function (x) {
+        if (x && !seen[x]) { seen[x] = true; out.push(x); }
+      });
+    });
+    return out.join(" ");
+  }
+
+  function startAuth(intent, silent, extraScope) {
     var state = rnd();
+    var adopt = !!extraScope || intent === "adopt" || (cfg && cfg.wideScope);
+    var scope = scopeList(adopt);
     try {
-      sessionStorage.setItem(OAUTH_KEY, JSON.stringify({ state: state, intent: intent || "check", silent: !!silent, at: Date.now() }));
+      sessionStorage.setItem(OAUTH_KEY, JSON.stringify({ state: state, intent: intent || "check", silent: !!silent, at: Date.now(), adopt: !!adopt }));
       if (silent) sessionStorage.setItem("hesap_silent_at", String(Date.now()));
+      if (intent === "adopt") sessionStorage.setItem("hesap_adopt_tried", String(Date.now()));
     } catch (e) {}
     var q = {
       client_id: CLIENT_ID,
       redirect_uri: REDIRECT,
       response_type: "token",
-      scope: SCOPE,
+      scope: scope,
       include_granted_scopes: "true",
       state: state
     };
     if (silent) q.prompt = "none";
+    else if (intent === "adopt" && cfg && cfg.email) { /* yalnızca yeni kapsam onayı; hesap seçimi yok */ }
     else if (!cfg || !cfg.email) q.prompt = "select_account";
     if (cfg && cfg.email) q.login_hint = cfg.email;
     var url = AUTH_URL + "?" + Object.keys(q).map(function (k) { return k + "=" + encodeURIComponent(q[k]); }).join("&");
-    log((silent ? "sessiz " : "") + "Google girişine yönlendiriliyor · amaç: " + intent);
+    log((silent ? "sessiz " : "") + "Google girişine yönlendiriliyor · amaç: " + intent + (adopt ? " · kapsam: drive" : ""));
     status = "busy"; paint();
     setTimeout(function () { location.assign(url); }, silent ? 0 : 120);
     return new Promise(function () {});   /* sayfa ayrılıyor */
@@ -198,8 +220,21 @@ window.DriveSync = (function () {
   function qEsc(s) { return String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'"); }
 
   function findOne(q) {
-    return api("/drive/v3/files?" + qs({ q: q, spaces: "drive", fields: "files(id,name,modifiedTime,appProperties)", pageSize: 10 }))
-      .then(function (r) { return (r && r.files && r.files[0]) || null; });
+    return findAll(q).then(function (list) { return list[0] || null; });
+  }
+  function findAll(q) {
+    return api("/drive/v3/files?" + qs({ q: q, spaces: "drive", fields: "files(id,name,modifiedTime,parents,appProperties)", pageSize: 20 }))
+      .then(function (r) { return (r && r.files) || []; });
+  }
+  function scoreBackup(f) {
+    var ap = (f && f.appProperties) || {};
+    var rev = Number(ap.rev || 0);
+    var tx = Number(ap.tx || 0);
+    return (rev > 0 ? 100000 : 0) + tx * 10 + rev;
+  }
+  function pickBackup(list) {
+    if (!list || !list.length) return null;
+    return list.slice().sort(function (a, b) { return scoreBackup(b) - scoreBackup(a); })[0];
   }
 
   function folderOk(id) {
@@ -211,8 +246,13 @@ window.DriveSync = (function () {
   function ensureFolder(create) {
     return folderOk(st.folderId).then(function (ok) {
       if (ok) return st.folderId;
-      return findOne("name='" + FOLDER_NAME + "' and mimeType='" + FOLDER_MIME + "' and trashed=false").then(function (f) {
-        if (f) { st.folderId = f.id; return f.id; }
+      return findAll("name='" + FOLDER_NAME + "' and mimeType='" + FOLDER_MIME + "' and trashed=false").then(function (folders) {
+        var rootOne = null;
+        (folders || []).forEach(function (f) {
+          if ((f.parents || []).indexOf("root") >= 0) rootOne = rootOne || f;
+        });
+        var chosen = rootOne || (folders && folders[0]) || null;
+        if (chosen) { st.folderId = chosen.id; return chosen.id; }
         if (!create) return null;
         return api("/drive/v3/files?fields=id", { method: "POST", type: "application/json", body: JSON.stringify({ name: FOLDER_NAME, mimeType: FOLDER_MIME, parents: ["root"] }) })
           .then(function (n) { st.folderId = n.id; log("Drive'da Hesap klasörü oluşturuldu"); return n.id; });
@@ -247,18 +287,15 @@ window.DriveSync = (function () {
 
   function findBackupFile() {
     var byId = st.fileId
-      ? api("/drive/v3/files/" + encodeURIComponent(st.fileId) + "?fields=id,trashed,modifiedTime,appProperties", { allow404: true })
+      ? api("/drive/v3/files/" + encodeURIComponent(st.fileId) + "?fields=id,trashed,modifiedTime,parents,appProperties", { allow404: true })
       : Promise.resolve(null);
     return byId.then(function (f) {
       if (f && !f.trashed) return f;
       st.fileId = null;
-      return ensureFolder(false).then(function (fid) {
-        var inFolder = fid
-          ? findOne("name='" + FILE_NAME + "' and trashed=false and '" + qEsc(fid) + "' in parents")
-          : Promise.resolve(null);
-        return inFolder.then(function (f2) {
-          return f2 || findOne("name='" + FILE_NAME + "' and trashed=false");
-        });
+      return findAll("name='" + FILE_NAME + "' and trashed=false").then(function (all) {
+        var chosen = pickBackup(all);
+        if (chosen && chosen.parents && chosen.parents[0]) st.folderId = chosen.parents[0];
+        return chosen;
       });
     });
   }
@@ -350,17 +387,38 @@ window.DriveSync = (function () {
           .catch(function (e) { log("arşiv kopyası alınamadı: " + e.message); });
       }
       var content = JSON.stringify(data);
-      return archive.then(function () {
-        if (cur.exists && cur.fileId) {
-          var mp = multipart({ appProperties: ap }, content);
-          return api("/upload/drive/v3/files/" + encodeURIComponent(cur.fileId) + "?uploadType=multipart&fields=id,modifiedTime,appProperties",
-            { method: "PATCH", type: mp.type, body: mp.body });
-        }
+      function createNew() {
         return ensureFolder(true).then(function (fid) {
           var mp = multipart({ name: FILE_NAME, mimeType: "application/json", parents: [fid], appProperties: ap }, content);
           return api("/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime,appProperties",
             { method: "POST", type: mp.type, body: mp.body });
         });
+      }
+      function moveSeedAside(id) {
+        if (!id) return Promise.resolve();
+        return ensureFolder(true).then(function () { return ensureArchive(); }).then(function (aid) {
+          var oldParent = (st.folderId || "");
+          var q = "addParents=" + encodeURIComponent(aid) + "&supportsAllDrives=false";
+          if (oldParent) q += "&removeParents=" + encodeURIComponent(oldParent);
+          return api("/drive/v3/files/" + encodeURIComponent(id) + "?" + q, {
+            method: "PATCH", type: "application/json",
+            body: JSON.stringify({ name: "hesap_yedek_tohum_" + stamp() + ".json" })
+          });
+        }).then(function () { log("eski tohum Hesap/eski/ altına alındı (silinmedi)"); })
+          .catch(function (e) { log("tohum taşınamadı (bırakıldı): " + e.message); });
+      }
+      return archive.then(function () {
+        if (cur.exists && cur.fileId) {
+          var mp = multipart({ appProperties: ap }, content);
+          return api("/upload/drive/v3/files/" + encodeURIComponent(cur.fileId) + "?uploadType=multipart&fields=id,modifiedTime,appProperties",
+            { method: "PATCH", type: mp.type, body: mp.body }).catch(function (e) {
+              if (e.code !== "forbidden") throw e;
+              log("bu dosyaya yazılamadı · uygulama kopyası oluşturulacak");
+              var oldId = cur.fileId;
+              return moveSeedAside(oldId).then(createNew);
+            });
+        }
+        return createNew();
       }).then(function (f) {
         st.fileId = f.id;
         return { rev: rev, updatedAt: at, fileId: f.id };
@@ -532,6 +590,24 @@ window.DriveSync = (function () {
     return Promise.resolve(null);
   }
 
+  function recentlyTriedAdopt() {
+    try {
+      var t = Number(sessionStorage.getItem("hesap_adopt_tried") || 0);
+      return t && (Date.now() - t < 10 * 60 * 1000);
+    } catch (e) { return false; }
+  }
+
+  /* Uygulama dosyası yoksa bir kez `drive` kapsamı iste (artırımlı). */
+  function maybeAdopt(reason) {
+    if (!configured() || busy || cfg.adoptDenied || !hasToken()) return Promise.resolve(null);
+    if (navigator.onLine === false) return Promise.resolve(null);
+    if (st.fileId || (remote && remote.exists)) return Promise.resolve(null);
+    if (recentlyTriedAdopt()) return Promise.resolve(null);
+    if (overlayOpen()) return Promise.resolve(null);
+    log("uygulama yedeği görünmedi · Drive'daki tohum için ek izin istenecek (" + (reason || "") + ")");
+    return startAuth("adopt", false, ADOPT_SCOPE);
+  }
+
   function check(reason, opts) {
     opts = opts || {};
     if (!configured() || busy) return Promise.resolve(null);
@@ -566,6 +642,7 @@ window.DriveSync = (function () {
       if (pending === "merge") return mergeFromDrive({ silent: true, reason: reason });
       if ((pending === "push" || pending === "first") && cfg.auto !== false) return push(false, { silent: true });
       if (pending && !opts.quiet && cfg.auto === false) maybePrompt();
+      if (!pending && !(meta && meta.exists)) return maybeAdopt(reason);
       return pending;
     }).catch(function (e) {
       if (e.code === "auth") { log("oturum düştü (" + reason + ")"); return needAuth("401"); }
@@ -584,6 +661,10 @@ window.DriveSync = (function () {
     if (!hasToken()) {
       if (opts.silent) { status = "auth"; paint(); return Promise.resolve(false); }
       return startAuth(force ? "pushForce" : "push", false);
+    }
+    if (localEmpty() && remote && remote.exists && !force) {
+      log("yerel boş, Drive dolu · gönderilmedi, Drive alınacak");
+      return pull({ silent: true, reason: "boş yerel, dolu Drive" });
     }
     busy = true; status = "busy"; paint(); sheetBusy(true);
     var s = A.state();
@@ -939,6 +1020,9 @@ window.DriveSync = (function () {
         '<button data-drv="pullNow">' + ic("down") + '<span>Drive\'dan çek</span></button>' +
         '<button data-drv="test">' + ic("check") + '<span>Kontrol et</span></button>' +
       '</div>' +
+      (cfg.adoptDenied
+        ? '<button class="set-row" data-drv="adoptRetry"><div><div class="k">Drive\'daki yedeği al</div><div class="d">Kendi Drive\'ındaki Hesap yedeğini uygulamaya almak için Google izni gerekir.</div></div><div class="v">›</div></button>'
+        : '') +
       '<div class="set-row">' +
         '<div><div class="k">Otomatik eşitle</div><div class="d">Açılışta Drive\'dan alır, değişiklikleri sormadan geri gönderir. Çevrimdışı telefonda çalışır.</div></div>' +
         '<button class="drv-switch' + (cfg.auto ? " on" : "") + '" data-drv="auto" role="switch" aria-checked="' + (cfg.auto ? "true" : "false") + '"><i></i></button>' +
@@ -1061,6 +1145,10 @@ window.DriveSync = (function () {
         { okText: "Çek", danger: false }).then(function (ok) { if (ok) pull(); });
     }
     else if (a === "test") testNow();
+    else if (a === "adoptRetry") {
+      cfg.adoptDenied = false;
+      saveCfg().then(function () { startAuth("adopt", false, ADOPT_SCOPE); });
+    }
     else if (a === "auto") {
       cfg.auto = !cfg.auto;
       saveCfg().then(function () { log("otomatik yedek: " + (cfg.auto ? "açık" : "kapalı")); paint(); if (cfg.auto) onLocalChange(); });
@@ -1089,7 +1177,11 @@ window.DriveSync = (function () {
       var d = all.drive;
       if (d && d.connected) {
         var migrated = !!d.autoOnDefault;
-        cfg = { connected: true, email: d.email || null, name: d.name || null, auto: migrated ? !!d.auto : true, autoOnDefault: true };
+        cfg = {
+          connected: true, email: d.email || null, name: d.name || null,
+          auto: migrated ? !!d.auto : true, autoOnDefault: true,
+          wideScope: !!d.wideScope, adoptDenied: !!d.adoptDenied
+        };
         if (!migrated) log("otomatik eşitleme varsayılan olarak açıldı");
       }
       var t = all.driveToken;
@@ -1097,8 +1189,24 @@ window.DriveSync = (function () {
       var s = all.driveState;
       if (s) { st = freshSt(); Object.keys(st).forEach(function (k) { if (s[k] !== undefined) st[k] = s[k]; }); }
       ret = consumeRedirect();
-      if (ret && ret.ok) return saveTok().then(function () { return fetchAccount().catch(function (e) { log("hesap bilgisi alınamadı: " + e.message); }); });
-      if (ret && !ret.ok && !ret.silent && ret.error === "access_denied") A.toast("Google bağlantısı iptal edildi");
+      if (ret && ret.ok) {
+        if (ret.intent === "adopt") { cfg = cfg || {}; cfg.wideScope = true; cfg.adoptDenied = false; }
+        return saveTok().then(function () {
+          return saveCfg().then(function () {
+            return fetchAccount().catch(function (e) { log("hesap bilgisi alınamadı: " + e.message); });
+          });
+        });
+      }
+      if (ret && !ret.ok && !ret.silent && ret.error === "access_denied") {
+        if (ret.intent === "adopt") {
+          cfg = cfg || { connected: true, auto: true };
+          cfg.adoptDenied = true;
+          log("tohum izni reddedildi · tekrar sorulmayacak");
+          A.toast("Drive'daki yedek şimdilik alınamadı. Ayarlar'dan yeniden deneyebilirsin.");
+          return saveCfg();
+        }
+        A.toast("Google bağlantısı iptal edildi");
+      }
       if (ret && !ret.ok && ret.silent) status = "auth";
       if (!configured() && !all.driveWelcomeSeen && !(ret && ret.ok)) { welcomeShown = showWelcome(); }
     }).then(function () {
@@ -1109,7 +1217,11 @@ window.DriveSync = (function () {
       if (configured()) A.render();   /* açılıştaki ilk çizim ayar yüklenmeden yapıldı */
       paint();
       if (configured()) log("hazır · " + (cfg.email || "") + " · otomatik " + (cfg.auto !== false ? "açık" : "kapalı") + " · yerel rev " + st.rev + (hasToken() ? " · oturum açık" : " · oturum yok"));
-      if (ret && ret.ok && ret.intent === "connect") {
+      if (ret && ret.ok && ret.intent === "adopt") {
+        A.toast("Drive yedeğine erişim verildi");
+        lastCheckAt = 0;
+        setTimeout(function () { check("yedek alma", { force: true }); }, 500);
+      } else if (ret && ret.ok && ret.intent === "connect") {
         A.toast("Google Drive bağlandı");
         lastCheckAt = 0;
         setTimeout(function () { check("bağlantı", { force: true }); }, 700);
@@ -1142,6 +1254,6 @@ window.DriveSync = (function () {
     onLocalChange: onLocalChange,
     check: check,
     paint: paint,
-    _state: function () { return { cfg: cfg, hasToken: hasToken(), st: st, pending: pending, status: status, needInteractive: needInteractive, localHash: localHash, remote: remote }; }
+    _state: function () { return { cfg: cfg, hasToken: hasToken(), st: st, pending: pending, status: status, needInteractive: needInteractive, localHash: localHash, remote: remote, wideScope: !!(cfg && cfg.wideScope), adoptDenied: !!(cfg && cfg.adoptDenied) }; }
   };
 })();
