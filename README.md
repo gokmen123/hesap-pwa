@@ -1,4 +1,4 @@
-# Hesap — 0.3.9
+# Hesap — 0.3.10
 
 Kişisel para takibi PWA'sı. Kategorilere ayrılmış gelir/gider, her zaman üstte duran toplam bakiye, aylık özet.
 
@@ -92,4 +92,17 @@ Service worker her varlığı **network-first** getirir (6 sn zaman aşımı; a�
 
 ## Sürüm
 
-`0.3.9`. Uygulama sürümü `js/app.js` içindeki `APP_VERSION`; sürüm damgası `version.json`.
+`0.3.10`. Uygulama sürümü `js/app.js` içindeki `APP_VERSION`; sürüm damgası `version.json`.
+
+## Genel test (`genel_test`)
+
+Her güncellemeden önce tüm testlerin geçtiğinden emin ol. Testler `tests/` klasöründedir; uygulama (`index.html`, `sw.js`) bu klasörü yüklemez ve önbelleğe almaz.
+
+```bash
+cd tests
+npm install                       # yalnızca ilk sefer
+npx playwright install chromium   # yalnızca ilk sefer
+node genel_test.js                # veya: npm test
+```
+
+Test, uygulamayı yerel bir sunucudan başsız Chromium'da **boş ve geçici bir profille** açar. Drive/Takvim kapalıdır (`config.js` testte boş kimlikle değiştirilir, Google'a giden her istek engellenir), yani gerçek verine dokunmaz. Kapsam: sürüm tutarlılığı, başlangıç kategorileri, kategori ekleme (yeni kategoride Gelir/Gider butonları dahil), kategori türü, gelir/gider/düzeltme hareketleri, bakiyeler, düzenle/sil, yeniden açılışta kalıcılık, kategori silme (tombstone), yedek al/yükle (eski biçim, bozuk dosya, yeni format), özet ve hatırlatmalar. Sonunda `genel_test: N geçti, 0 başarısız` görmelisin; başarısız test varsa çıkış kodu 1 olur.

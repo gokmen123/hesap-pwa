@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "0.3.9";
+  var APP_VERSION = "0.3.10";
 
   /* ================= İKONLAR (yerleşik SVG kümesi) ================= */
   var ICONS = {
