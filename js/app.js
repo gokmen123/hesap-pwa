@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "0.3.10";
+  var APP_VERSION = "0.4.0";
 
   /* ================= İKONLAR (yerleşik SVG kümesi) ================= */
   var ICONS = {
@@ -556,13 +556,19 @@
       var typ = r.type === "receive" ? "Ödeme al" : "Ödeme yap";
       var when = over ? "Gecikti · " + Fmt.fullDate(r.date) : Fmt.fullDate(r.date);
       if (r.repeat === "monthly") when += " · her ay";
+      var badge = "";
+      if (r.groupId && r.installmentCount) {
+        badge = '<span class="rem-badge">' + esc(String(r.installmentIndex || 1) + "/" + r.installmentCount + " taksit") + '</span>';
+        var kalan = remGroupRemainingAmount(r);
+        if (kalan > 0) badge += '<span class="rem-badge faint">kalan ' + esc(Fmt.money(kalan)) + ' TL</span>';
+      }
       var sub = typ + " · " + when + (cat ? " · " + cat.name : "") + (r.note ? " · " + r.note : "");
       return '<div class="swipe-row" data-swipe="rem" data-id="' + esc(r.id) + '">' +
         '<div class="swipe-actions"><button type="button" class="swipe-del" data-act="swipeDelRem" data-id="' + esc(r.id) + '">Sil</button></div>' +
-        '<div class="swipe-front rem' + (over ? " over" : "") + '" data-rem="' + esc(r.id) + '">' +
+        '<div class="swipe-front rem' + (over ? " over" : "") + (r.groupId ? " taksit" : "") + '" data-rem="' + esc(r.id) + '">' +
           '<div class="rem-ico">' + svg("bell") + '</div>' +
           '<button class="rem-body" data-act="remOpen" data-id="' + esc(r.id) + '">' +
-            '<div class="rem-name">' + esc(typ) + (r.note ? " — " + esc(r.note) : "") + '</div>' +
+            '<div class="rem-name">' + esc(typ) + (r.note ? " — " + esc(r.note) : "") + (badge ? '<span class="rem-badges">' + badge + '</span>' : "") + '</div>' +
             '<div class="rem-sub">' + esc(sub) + '</div></button>' +
           '<div class="rem-amt ' + (r.type === "receive" ? "get" : "pay") + '">' + Fmt.money(r.amount) + '</div>' +
           '<button class="rem-cal" data-act="remIcs" data-id="' + esc(r.id) + '" aria-label="Takvime ekle">' + svg("cal") + '</button>' +
@@ -1589,7 +1595,7 @@
   }
 
   /* ================= HATIRLATMA FORMU ================= */
-  var remForm = { id: null, type: "pay", amount: 0, categoryId: null, date: "", repeat: "", note: "" };
+  var remForm = { id: null, type: "pay", amount: 0, categoryId: null, date: "", repeat: "", note: "", taksit: false, taksitCount: 3, groupId: null, groupEdit: false };
 
   function addMonthsYMD(ymd, n) {
     var p = String(ymd).split("-");
@@ -1601,6 +1607,47 @@
     return y + "-" + ("0" + m).slice(-2) + "-" + ("0" + d).slice(-2);
   }
 
+  function splitInstallments(total, count, firstDate) {
+    var n = Math.max(2, Math.min(36, Math.round(Number(count) || 0)));
+    var tot = Math.round(Math.abs(Number(total) || 0));
+    var base = Math.floor(tot / n);
+    var rest = tot - base * n;
+    var rows = [];
+    for (var i = 0; i < n; i++) {
+      rows.push({
+        index: i + 1,
+        count: n,
+        amount: base + (i === n - 1 ? rest : 0),
+        date: addMonthsYMD(firstDate || Fmt.todayYMD(), i)
+      });
+    }
+    return rows;
+  }
+
+  function remGroupAll(r) {
+    if (!r || !r.groupId) return r ? [r] : [];
+    var all = (S.reminders || []).concat(S.remTombs || []);
+    return all.filter(function (x) { return x && x.groupId === r.groupId; })
+      .sort(function (a, b) { return (a.installmentIndex || 0) - (b.installmentIndex || 0); });
+  }
+  function remGroupLive(r) {
+    return remGroupAll(r).filter(function (x) { return x && !x.deleted; });
+  }
+  function remGroupRemaining(r) {
+    return remGroupLive(r).filter(function (x) { return !x.done; });
+  }
+  function remGroupRemainingAmount(r) {
+    var s = 0;
+    remGroupRemaining(r).forEach(function (x) { s += Number(x.amount) || 0; });
+    return s;
+  }
+  function clampTaksitCount(n) {
+    n = Math.round(Number(n) || 0);
+    if (n < 2) n = 2;
+    if (n > 36) n = 36;
+    return n;
+  }
+
   function remById(id) {
     for (var i = 0; i < (S.reminders || []).length; i++) if (S.reminders[i].id === id) return S.reminders[i];
     return null;
@@ -1609,8 +1656,8 @@
   function openReminderSheet(id) {
     var r = id ? remById(id) : null;
     remForm = r
-      ? { id: r.id, type: r.type === "receive" ? "receive" : "pay", amount: r.amount, categoryId: r.categoryId || null, date: r.date, repeat: r.repeat || "", note: r.note || "" }
-      : { id: null, type: "pay", amount: 0, categoryId: null, date: Fmt.todayYMD(), repeat: "", note: "" };
+      ? { id: r.id, type: r.type === "receive" ? "receive" : "pay", amount: r.amount, categoryId: r.categoryId || null, date: r.date, repeat: r.repeat || "", note: r.note || "", taksit: false, taksitCount: 3, groupId: r.groupId || null, groupEdit: false }
+      : { id: null, type: "pay", amount: 0, categoryId: null, date: Fmt.todayYMD(), repeat: "", note: "", taksit: false, taksitCount: 3, groupId: null, groupEdit: false };
     renderReminderSheet();
     openSheet();
     setTimeout(function () {
@@ -1619,42 +1666,137 @@
     }, 320);
   }
 
+  function openTaksitPlanEditor(id) {
+    var r = remById(id);
+    if (!r || !r.groupId) return;
+    var live = remGroupLive(r);
+    if (!live.length) return;
+    var first = live[0];
+    var total = 0;
+    live.forEach(function (x) { total += Number(x.amount) || 0; });
+    if (r.groupTotal) total = r.groupTotal;
+    remForm = {
+      id: null,
+      type: first.type === "receive" ? "receive" : "pay",
+      amount: total,
+      categoryId: first.categoryId || null,
+      date: first.date,
+      repeat: "",
+      note: first.note || "",
+      taksit: true,
+      taksitCount: r.installmentCount || live.length,
+      groupId: r.groupId,
+      groupEdit: true
+    };
+    closeSheet();
+    renderReminderSheet();
+    openSheet();
+  }
+
+  function taksitPreviewRows() {
+    if (!remForm.taksit) return [];
+    var amtEl = $("#rem-amount");
+    var dateEl = $("#rem-date");
+    var amount = Fmt.parseAmount(amtEl ? amtEl.value : "") || remForm.amount || 0;
+    var date = (dateEl && dateEl.value) || remForm.date || Fmt.todayYMD();
+    if (amount <= 0) return [];
+    return splitInstallments(amount, remForm.taksitCount, date);
+  }
+
+  function taksitPreviewHtml() {
+    var rows = taksitPreviewRows();
+    if (!remForm.taksit) return "";
+    if (!rows.length) {
+      return '<div class="taksit-preview" id="taksit-preview"><div class="taksit-empty">Tutarı gir, taksitler burada görünsün. Tutar eşit bölünür; kalan kuruş son taksite eklenir.</div></div>';
+    }
+    var items = rows.map(function (row) {
+      return '<div class="taksit-row">' +
+        '<div class="taksit-i">' + row.index + "/" + row.count + '</div>' +
+        '<div class="taksit-when">' + esc(Fmt.fullDate(row.date)) + '</div>' +
+        '<div class="taksit-amt">' + esc(Fmt.money(row.amount)) + ' TL</div>' +
+      '</div>';
+    }).join("");
+    return '<div class="taksit-preview" id="taksit-preview">' +
+      '<div class="taksit-preview-h">Önizleme</div>' +
+      items +
+      '<div class="taksit-hint">Tutar eşit bölünür, kalan kuruş son taksite yazılır. Tarihler ay sonunda kısılır (31 Ocak → 28/29 Şubat).</div>' +
+    '</div>';
+  }
+
+  function refreshTaksitPreview() {
+    var box = $("#taksit-preview");
+    if (!box || !box.parentNode) return;
+    var wrap = document.createElement("div");
+    wrap.innerHTML = taksitPreviewHtml();
+    if (wrap.firstChild) box.parentNode.replaceChild(wrap.firstChild, box);
+  }
+
   function renderReminderSheet() {
     var isEdit = !!remForm.id;
+    var planEdit = !!remForm.groupEdit;
+    var taksit = !!remForm.taksit;
     var amountVal = remForm.amount ? Fmt.money(remForm.amount) : "";
     var picks = S.categories.slice().sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); })
       .map(function (c) {
         return '<button class="chip-pick' + (remForm.categoryId === c.id ? " on" : "") + '" data-rempick="' + esc(c.id) + '" style="' + catStyle(c) + '">' +
           '<div class="dot">' + svg(c.icon) + '</div><span>' + esc(c.name) + '</span></button>';
       }).join("");
+    var title = planEdit ? "Taksit planını düzenle" : (isEdit ? "Hatırlatmayı düzenle" : "Yeni hatırlatma");
+    var paidLock = false;
+    var paidCount = 0;
+    if (planEdit && remForm.groupId) {
+      paidCount = remGroupLive({ groupId: remForm.groupId }).filter(function (x) { return x.done; }).length;
+      paidLock = paidCount > 0;
+    }
+    var chips = [2, 3, 6, 9, 12].map(function (n) {
+      return '<button type="button" class="taksit-chip' + (remForm.taksitCount === n ? " on" : "") + '" data-taksitn="' + n + '"' + (paidLock ? " disabled" : "") + '>' + n + '</button>';
+    }).join("");
+    var taksitBlock = taksit ? (
+      '<div class="field-label">Taksit sayısı</div>' +
+      '<div class="taksit-count-row">' +
+        '<button type="button" class="taksit-step" data-taksit-delta="-1" aria-label="Azalt"' + (paidLock ? " disabled" : "") + '>−</button>' +
+        '<div class="taksit-n" id="taksit-n">' + remForm.taksitCount + '</div>' +
+        '<button type="button" class="taksit-step" data-taksit-delta="1" aria-label="Artır"' + (paidLock ? " disabled" : "") + '>+</button>' +
+        '<div class="taksit-chips">' + chips + '</div>' +
+      '</div>' +
+      (paidLock ? '<div class="taksit-lock">Ödenen ' + paidCount + ' taksit duruyor; tutar ve sayı değiştirilemez.</div>' : "") +
+      taksitPreviewHtml()
+    ) : "";
     SHT.body.innerHTML =
       '<div class="sheet-pin">' +
-        '<div class="sheet-title">' + (isEdit ? "Hatırlatmayı düzenle" : "Yeni hatırlatma") + '</div>' +
+        '<div class="sheet-title">' + title + '</div>' +
         '<div class="seg">' +
-          '<button type="button" data-remtype="pay" class="' + (remForm.type !== "receive" ? "on" : "") + '">Ödeme yap</button>' +
-          '<button type="button" data-remtype="receive" class="' + (remForm.type === "receive" ? "on income" : "") + '">Ödeme al</button>' +
+          '<button type="button" data-remtype="pay" class="' + (remForm.type !== "receive" ? "on" : "") + '">Ödenecek</button>' +
+          '<button type="button" data-remtype="receive" class="' + (remForm.type === "receive" ? "on income" : "") + '">Alınacak</button>' +
         '</div>' +
         '<div class="amount-field' + (remForm.type === "receive" ? " income" : "") + '">' +
-          '<input id="rem-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00" value="' + esc(amountVal) + '" aria-label="Tutar">' +
-          '<div class="ccy">Türk Lirası</div></div>' +
+          '<input id="rem-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00" value="' + esc(amountVal) + '" aria-label="' + (taksit ? "Toplam tutar" : "Tutar") + '"' + (paidLock ? " disabled" : "") + '>' +
+          '<div class="ccy">' + (taksit ? "Toplam tutar" : "Türk Lirası") + '</div></div>' +
+        ((!isEdit || planEdit) ? (
+          '<div class="taksit-toggle"><div><div class="k">Taksitli</div><div class="d">Tutarı eşit böler, her ay bir ödeme tarihi oluşturur</div></div>' +
+            '<button type="button" class="drv-switch' + (taksit ? " on" : "") + '" data-act="taksitToggle" role="switch" aria-checked="' + (taksit ? "true" : "false") + '"' + (planEdit ? " disabled" : "") + '><i></i></button></div>'
+        ) : "") +
         '<div class="field-label">Kategori</div>' +
         '<div class="cat-chips">' + (picks || '<div class="empty">Kategori yok</div>') + '</div>' +
       '</div>' +
       '<div class="sheet-scroll">' +
-        '<div class="field-label">Tarih</div>' +
+        '<div class="field-label">' + (taksit ? "İlk ödeme tarihi" : "Tarih") + '</div>' +
         '<div class="input-row date-row">' + svg("cal") +
           '<div class="val" id="rem-date-label">' + esc(Fmt.fullDate(remForm.date)) + '</div>' +
           '<input id="rem-date" type="date" value="' + esc(remForm.date) + '" aria-label="Tarih"></div>' +
-        '<div class="field-label">Tekrar</div>' +
-        '<div class="seg">' +
-          '<button type="button" data-remrepeat="" class="' + (!remForm.repeat ? "on" : "") + '">Yok</button>' +
-          '<button type="button" data-remrepeat="monthly" class="' + (remForm.repeat === "monthly" ? "on" : "") + '">Her ay</button>' +
-        '</div>' +
+        (taksit ? "" : (
+          '<div class="field-label">Tekrar</div>' +
+          '<div class="seg">' +
+            '<button type="button" data-remrepeat="" class="' + (!remForm.repeat ? "on" : "") + '">Yok</button>' +
+            '<button type="button" data-remrepeat="monthly" class="' + (remForm.repeat === "monthly" ? "on" : "") + '">Her ay</button>' +
+          '</div>'
+        )) +
         '<div class="field-label">Not</div>' +
         '<div class="input-row">' + svg("note") +
           '<input id="rem-note" type="text" maxlength="120" autocomplete="off" placeholder="İsteğe bağlı" value="' + esc(remForm.note) + '"></div>' +
+        taksitBlock +
         '<div class="form-error" id="form-error"></div>' +
-        '<button class="save-btn" data-act="saveReminder">Kaydet</button>' +
+        '<button class="save-btn" data-act="saveReminder">' + (taksit && !planEdit ? (remForm.taksitCount + " taksit oluştur") : "Kaydet") + '</button>' +
         (isEdit
           ? '<button class="ghost-btn" data-act="remIcs" data-id="' + esc(remForm.id) + '">Takvime ekle (.ics)</button>' +
             '<button class="danger-btn" data-act="delReminder" data-id="' + esc(remForm.id) + '">Sil</button>'
@@ -1667,7 +1809,9 @@
         var v = Fmt.liveAmount(inp.value);
         inp.value = v;
         if (caretAtEnd) { try { inp.setSelectionRange(v.length, v.length); } catch (e) {} }
+        remForm.amount = Fmt.parseAmount(v) || 0;
         formError("");
+        refreshTaksitPreview();
       });
     }
     var di = $("#rem-date");
@@ -1675,6 +1819,7 @@
       remForm.date = di.value || Fmt.todayYMD();
       var lb = $("#rem-date-label");
       if (lb) lb.textContent = Fmt.fullDate(remForm.date);
+      refreshTaksitPreview();
     });
     $$("[data-remtype]", SHT.body).forEach(function (b) {
       b.addEventListener("click", function () {
@@ -1697,10 +1842,132 @@
         });
       });
     });
+    $$("[data-taksitn]", SHT.body).forEach(function (b) {
+      b.addEventListener("click", function () {
+        if (paidLock) return;
+        remForm.taksitCount = clampTaksitCount(b.getAttribute("data-taksitn"));
+        renderReminderSheet();
+      });
+    });
+    $$("[data-taksit-delta]", SHT.body).forEach(function (b) {
+      b.addEventListener("click", function () {
+        if (paidLock) return;
+        remForm.taksitCount = clampTaksitCount((remForm.taksitCount || 3) + Number(b.getAttribute("data-taksit-delta") || 0));
+        renderReminderSheet();
+      });
+    });
     requestAnimationFrame(fitSheetToViewport);
   }
 
+  function syncCal(rec, del) {
+    if (!window.HesapCalendar) return;
+    if (del) HesapCalendar.onReminderDeleted(rec);
+    else HesapCalendar.onReminderSaved(rec);
+  }
+
+  function saveTaksitReminders() {
+    var amtEl = $("#rem-amount");
+    var noteEl = $("#rem-note");
+    var dateEl = $("#rem-date");
+    var amount = Fmt.parseAmount(amtEl ? amtEl.value : "") || remForm.amount || 0;
+    var date = (dateEl && dateEl.value) || remForm.date || Fmt.todayYMD();
+    var note = noteEl ? noteEl.value.trim() : (remForm.note || "");
+    if (amount <= 0) { formError("Tutar 0'dan büyük olmalı."); if (amtEl) amtEl.focus(); return; }
+    var count = clampTaksitCount(remForm.taksitCount);
+    var rows = splitInstallments(amount, count, date);
+    var typ = remForm.type === "receive" ? "receive" : "pay";
+    var t = now();
+    if (remForm.groupEdit && remForm.groupId) {
+      var live = remGroupLive({ groupId: remForm.groupId });
+      var paid = live.filter(function (x) { return x.done; });
+      var unpaid = live.filter(function (x) { return !x.done; });
+      if (paid.length && count < paid.length) {
+        formError("Taksit sayısı, ödenen taksitlerden az olamaz.");
+        return;
+      }
+      if (paid.length) {
+        /* ödenenler durur; yalnızca not/kategori/tür ve kalan tarihleri güncelle */
+        var jobs = unpaid.map(function (x, i) {
+          var rec = Object.assign({}, x);
+          rec.type = typ;
+          rec.categoryId = remForm.categoryId || null;
+          rec.note = note;
+          rec.date = addMonthsYMD(date, i);
+          rec.updatedAt = t;
+          return DB.putReminder(rec).then(function () { return rec; });
+        });
+        Promise.all(jobs).then(function (recs) { return loadData().then(function () { return recs; }); }).then(function (recs) {
+          closeSheet();
+          render();
+          toast("Taksit planı güncellendi");
+          (recs || []).forEach(function (rec) { syncCal(rec, false); });
+        });
+        return;
+      }
+      var keep = live.slice();
+      var jobs2 = [];
+      var gid = remForm.groupId;
+      rows.forEach(function (row, i) {
+        var rec;
+        if (keep[i]) {
+          rec = Object.assign({}, keep[i]);
+          rec.type = typ;
+          rec.amount = row.amount;
+          rec.categoryId = remForm.categoryId || null;
+          rec.date = row.date;
+          rec.repeat = null;
+          rec.note = note;
+          rec.installmentIndex = row.index;
+          rec.installmentCount = row.count;
+          rec.groupTotal = amount;
+          rec.updatedAt = t;
+        } else {
+          rec = {
+            id: uid(), type: typ, amount: row.amount, categoryId: remForm.categoryId || null,
+            date: row.date, repeat: null, note: note, done: false, doneAt: null, lastDoneDate: null,
+            createdAt: t, updatedAt: t, groupId: gid, installmentIndex: row.index,
+            installmentCount: row.count, groupTotal: amount
+          };
+        }
+        jobs2.push(DB.putReminder(rec).then(function () { return { rec: rec, del: false }; }));
+      });
+      keep.slice(rows.length).forEach(function (x) {
+        var tomb = Object.assign({}, x);
+        tomb.deleted = true;
+        tomb.updatedAt = t;
+        jobs2.push(DB.putReminder(tomb).then(function () { return { rec: x, del: true }; }));
+      });
+      Promise.all(jobs2).then(function (outs) { return loadData().then(function () { return outs; }); }).then(function (outs) {
+        closeSheet();
+        render();
+        toast("Taksit planı güncellendi");
+        (outs || []).forEach(function (o) { if (o && o.rec) syncCal(o.rec, o.del); });
+      });
+      return;
+    }
+    var groupId = uid();
+    var jobs = rows.map(function (row) {
+      var rec = {
+        id: uid(), type: typ, amount: row.amount, categoryId: remForm.categoryId || null,
+        date: row.date, repeat: null, note: note, done: false, doneAt: null, lastDoneDate: null,
+        createdAt: t, updatedAt: t, groupId: groupId, installmentIndex: row.index,
+        installmentCount: row.count, groupTotal: amount
+      };
+      return DB.putReminder(rec).then(function (ok) {
+        if (!ok) throw new Error("kaydedilemedi");
+        return rec;
+      });
+    });
+    Promise.all(jobs).then(function (recs) { return loadData().then(function () { return recs; }); }).then(function (recs) {
+      closeSheet();
+      render();
+      toast(count + " taksit eklendi");
+      (recs || []).forEach(function (rec) { syncCal(rec, false); });
+    }).catch(function () { formError("Kaydedilemedi, tekrar dene."); });
+  }
+
   function saveReminder() {
+    if (remForm.taksit) { saveTaksitReminders(); return; }
     var amtEl = $("#rem-amount");
     var noteEl = $("#rem-note");
     var dateEl = $("#rem-date");
@@ -1731,21 +1998,72 @@
       };
     }
     var wasNew = !remForm.id;
-    var oldRec = wasNew ? null : remById(remForm.id);
     DB.putReminder(rec).then(function (ok) {
       if (!ok) { formError("Kaydedilemedi, tekrar dene."); return; }
       return loadData().then(function () {
         closeSheet();
         render();
         toast(wasNew ? "Hatırlatma eklendi" : "Hatırlatma güncellendi");
-        if (window.HesapCalendar) HesapCalendar.onReminderSaved(rec);
+        syncCal(rec, false);
       });
+    });
+  }
+
+  function askDeleteTaksit(r) {
+    S.remActionId = r.id;
+    SHT.body.innerHTML =
+      '<div class="sheet-pin" id="rem-del-sheet">' +
+        '<div class="sheet-title">Taksiti sil</div>' +
+        '<div class="sheet-sub">Bu ödeme ' + esc(String(r.installmentIndex || 1) + "/" + (r.installmentCount || "")) +
+          ' taksit. Yalnızca bunu mu, yoksa tüm planı mı silmek istiyorsun?</div>' +
+      '</div>' +
+      '<div class="sheet-scroll rem-action-btns">' +
+        '<button class="ghost-btn strong" data-act="delTaksitOne" data-id="' + esc(r.id) + '">Sadece bu taksit</button>' +
+        '<button class="danger-btn" data-act="delTaksitAll" data-id="' + esc(r.id) + '">Tüm taksitler</button>' +
+        '<button class="ghost-btn" data-act="cancel">Vazgeç</button>' +
+      '</div>';
+    openSheet();
+    requestAnimationFrame(fitSheetToViewport);
+  }
+
+  function tombstoneReminder(r, opts) {
+    opts = opts || {};
+    var snap = Object.assign({}, r);
+    var tomb = Object.assign({}, r);
+    tomb.deleted = true;
+    tomb.updatedAt = now();
+    return DB.putReminder(tomb).then(function () {
+      if (window.HesapCalendar) HesapCalendar.onReminderDeleted(r);
+      return snap;
+    });
+  }
+
+  function deleteTaksitOne(id) {
+    var r = remById(id);
+    if (!r) return;
+    tombstoneReminder(r).then(function () { return loadData(); }).then(function () {
+      closeSheet();
+      render();
+      toast("Taksit silindi");
+    });
+  }
+
+  function deleteTaksitAll(id) {
+    var r = remById(id);
+    if (!r || !r.groupId) return;
+    var live = remGroupLive(r);
+    var jobs = live.map(function (x) { return tombstoneReminder(x); });
+    Promise.all(jobs).then(function () { return loadData(); }).then(function () {
+      closeSheet();
+      render();
+      toast("Tüm taksitler silindi");
     });
   }
 
   function deleteReminder(id) {
     var r = remById(id);
     if (!r) return;
+    if (r.groupId) { closeAllSwipe(); askDeleteTaksit(r); return; }
     confirmDialog("Hatırlatmayı sil", "Bu hatırlatma silinsin mi?", {
       okText: "Sil",
       onConfirm: function () { if (window.HesapCalendar) HesapCalendar.onReminderDeleted(r); }
@@ -1920,6 +2238,7 @@
       '<div class="sheet-scroll rem-action-btns">' +
         '<button class="save-btn" id="rem-post" data-act="remPost" data-id="' + esc(r.id) + '">' + esc(payLabel) + "</button>" +
         '<button class="ghost-btn strong" id="rem-done" data-act="remDone" data-id="' + esc(r.id) + '">Tamamlandı (işlemeden)</button>' +
+        (r.groupId ? '<button class="ghost-btn" id="rem-edit-plan" data-act="editTaksit" data-id="' + esc(r.id) + '">Taksit planını düzenle</button>' : '') +
         '<button class="ghost-btn" id="rem-cancel" data-act="cancel">Vazgeç</button>' +
       "</div>";
     openSheet();
@@ -2036,7 +2355,11 @@
     lines.push("END:VCALENDAR");
     return lines.join("\r\n") + "\r\n";
   }
-  function reminderIcs(r, opts) { return buildCalendarIcs([r], opts); }
+  function reminderIcs(r, opts) {
+    var rows = (r && r.groupId) ? remGroupRemaining(r) : [r];
+    if (!rows.length && r) rows = [r];
+    return buildCalendarIcs(rows, opts);
+  }
   function openIcsFile(ics, filename) {
     try { window.__hesapLastIcs = { ics: ics, filename: filename || "hesap.ics", at: Date.now() }; } catch (e) {}
     var blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
@@ -2054,7 +2377,8 @@
     var r = remById(id);
     if (!r) return;
     var ics = reminderIcs(r);
-    openIcsFile(ics, "hesap-hatirlatma-" + String(r.date).replace(/-/g, "") + ".ics");
+    var fname = r.groupId ? "hesap-taksitler.ics" : ("hesap-hatirlatma-" + String(r.date).replace(/-/g, "") + ".ics");
+    openIcsFile(ics, fname);
     return ics;
   }
   function addAllRemindersToCalendar() {
@@ -2101,7 +2425,11 @@
           date: r.date, repeat: r.repeat || null, note: r.note || "",
           done: !!r.done, doneAt: r.doneAt || null, lastDoneDate: r.lastDoneDate || null,
           createdAt: r.createdAt, updatedAt: r.updatedAt,
-          googleEventId: r.googleEventId || null
+          googleEventId: r.googleEventId || null,
+          groupId: r.groupId || null,
+          installmentIndex: r.installmentIndex || null,
+          installmentCount: r.installmentCount || null,
+          groupTotal: r.groupTotal || null
         };
         if (r.deleted) o.deleted = true;
         return o;
@@ -2312,18 +2640,30 @@
         updatedAt: Number(r.updatedAt) || t,
         googleEventId: r.googleEventId ? String(r.googleEventId) : null
       };
+      if (r.groupId) {
+        recR.groupId = String(r.groupId);
+        recR.installmentIndex = Math.max(1, Number(r.installmentIndex) || 1);
+        recR.installmentCount = Math.max(1, Number(r.installmentCount) || recR.installmentIndex);
+        if (r.groupTotal) recR.groupTotal = Math.round(Math.abs(Number(r.groupTotal))) || null;
+      }
       if (r.deleted) recR.deleted = true;
       rems.push(recR);
     });
     var theme = (data.settings && ["auto", "light", "dark"].indexOf(data.settings.theme) >= 0) ? data.settings.theme : (S.settings.theme || "auto");
-    return { cats: cats, txs: txs, rems: rems, bad: bad, theme: theme };
+    var calendarId = (data.settings && data.settings.calendarId) ? String(data.settings.calendarId) : null;
+    return { cats: cats, txs: txs, rems: rems, bad: bad, theme: theme, calendarId: calendarId };
   }
 
   /* tüm veriyi değiştir, yeniden yükle, çiz */
-  function replaceData(cats, txs, theme, rems) {
+  function replaceData(cats, txs, theme, rems, extra) {
     return DB.replaceAll(cats, txs, { theme: theme || S.settings.theme || "auto", schemaVersion: 1 }, rems || []).then(function () {
       return loadData();
     }).then(function () {
+      var calId = extra && extra.calendarId;
+      if (calId) {
+        S.settings.calendarId = calId;
+        if (window.DriveSync && DriveSync.adoptCalendarId) DriveSync.adoptCalendarId(calId);
+      }
       applyTheme();
       render();
       return true;
@@ -2354,7 +2694,7 @@
 
     confirmDialog("Yedeği yükle", msg, { okText: "Üzerine yaz" }).then(function (ok) {
       if (!ok) return;
-      replaceData(cats, txs, n.theme, rems).then(function () {
+      replaceData(cats, txs, n.theme, rems, { calendarId: n.calendarId }).then(function () {
         DB.log("YEDEK", "içe aktarıldı: " + cats.length + " kategori, " + txs.length + " hareket, " + rems.length + " hatırlatma" + (bad ? ", " + bad + " atlandı" : ""));
         toast("Yedek yüklendi");
       }).catch(function (e) {
@@ -2476,6 +2816,18 @@
       if (act === "confirmMoveCat") { tombstoneCategory(S.moveCatId, S.moveTarget || null); return; }
       if (act === "cancel") { closeSheet(); return; }
       if (act === "newReminder") { openReminderSheet(null); return; }
+      if (act === "taksitToggle") {
+        ev.preventDefault();
+        if (remForm.groupEdit) return;
+        remForm.taksit = !remForm.taksit;
+        if (remForm.taksit) remForm.repeat = "";
+        if (!remForm.taksitCount) remForm.taksitCount = 3;
+        renderReminderSheet();
+        return;
+      }
+      if (act === "editTaksit") { ev.preventDefault(); openTaksitPlanEditor(t.getAttribute("data-id") || S.remActionId); return; }
+      if (act === "delTaksitOne") { ev.preventDefault(); deleteTaksitOne(t.getAttribute("data-id") || S.remActionId); return; }
+      if (act === "delTaksitAll") { ev.preventDefault(); deleteTaksitAll(t.getAttribute("data-id") || S.remActionId); return; }
       if (act === "saveReminder") { saveReminder(); return; }
       if (act === "remOpen") { ev.preventDefault(); openReminderActionSheet(t.getAttribute("data-id")); return; }
       if (act === "remPost") { ev.preventDefault(); finishReminder(t.getAttribute("data-id") || S.remActionId, true); return; }
@@ -2823,6 +3175,8 @@
       return buildCalendarIcs(rows);
     },
     lastIcs: function () { return window.__hesapLastIcs || null; },
+    splitInstallments: splitInstallments,
+    addMonthsYMD: addMonthsYMD,
     calendar: function () { return window.HesapCalendar ? HesapCalendar.debug() : null; },
     requestCalendar: function () { return window.HesapCalendar ? HesapCalendar.requestAccess() : null; },
     state: function () { return S; }

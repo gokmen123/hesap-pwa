@@ -17,8 +17,41 @@ window.HesapCalendar = (function () {
   var asking = false;
   var running = false;
   var kicked = false;
+  var snap = { queue: 0, lastError: "", calendarId: null };
 
   function log(m) { if (H && H.log) H.log(m); }
+  function rememberError(e) {
+    var msg = (e && e.message) ? String(e.message) : String(e || "");
+    if (/has not been used|not been used in project|API has not been used|is disabled|access not configured/i.test(msg)) {
+      snap.lastError = "Calendar API kapalı veya henüz açılmadı";
+    } else if (e && e.code === "auth") {
+      snap.lastError = "Oturum yenilenmeli";
+    } else if (msg) {
+      snap.lastError = msg.slice(0, 140);
+    }
+  }
+  function clearError() { snap.lastError = ""; }
+  function refreshSnap(queueLen) {
+    if (queueLen != null) snap.queue = queueLen;
+    var c = cfg();
+    snap.calendarId = ensuredId || (c && c.calendarId) || null;
+    if (H && H.paintSettings) H.paintSettings();
+  }
+  function statusInfo() {
+    var c = cfg();
+    if (!c || !c.connected) return { k: "off", t: "Google Takvim: kapalı", d: "Önce Drive'a bağlan" };
+    if (!hasScope()) return { k: "need", t: "Google Takvim: izin gerekli", d: "Hatırlatmaları Gmail takvimine yazmak için izin ver" };
+    if (snap.lastError === "Oturum yenilenmeli") return { k: "need", t: "Google Takvim: yeniden bağlan", d: "Oturum sona erdi, tekrar izin ver" };
+    if (snap.queue > 0) return { k: "wait", t: "Google Takvim: bekliyor", d: snap.queue + " işlem sırada" + (snap.lastError ? " · " + snap.lastError : "") };
+    if (snap.lastError && !(ensuredId || (c && c.calendarId))) {
+      return { k: "wait", t: "Google Takvim: bekliyor", d: snap.lastError };
+    }
+    var id = ensuredId || (c && c.calendarId) || "";
+    if (id) {
+      return { k: "ok", t: "Google Takvim: bağlı", d: id === "primary" ? "Birincil takvime yazılıyor" : "Hesap Hatırlatmalar takvimine yazılıyor" };
+    }
+    return { k: "wait", t: "Google Takvim: bekliyor", d: "Takvim hazırlanıyor" };
+  }
   function online() {
     if (window.__hesapCalOffline) return false;
     return !H || H.online();
@@ -90,7 +123,9 @@ window.HesapCalendar = (function () {
 
   function useCal(id) {
     ensuredId = id;
-    if (H && H.saveCalCfg) return H.saveCalCfg({ calendarId: id }).then(function () { return id; });
+    clearError();
+    refreshSnap();
+    if (H && H.saveCalCfg) return H.saveCalCfg({ calendarId: id }).then(function () { refreshSnap(); return id; });
     return Promise.resolve(id);
   }
 
@@ -131,6 +166,7 @@ window.HesapCalendar = (function () {
       log("takvim oluşturuldu: " + ((n && n.id) || ""));
       return useCal(n.id);
     }).catch(function (e) {
+      rememberError(e);
       log("takvim oluşturulamadı, birincil kullanılacak: " + (e && e.message ? e.message : e));
       return useCal("primary");
     });
@@ -171,7 +207,7 @@ window.HesapCalendar = (function () {
           allow404: true
         }).then(function (ev) { return ev || insert(); });
       }
-      return (rec.googleEventId ? patch(rec.googleEventId) : insert()).then(after);
+      return (rec.googleEventId ? patch(rec.googleEventId) : insert()).then(function (ev) { clearError(); refreshSnap(); return after(ev); });
     }); });
   }
 
@@ -205,7 +241,7 @@ window.HesapCalendar = (function () {
     return loadQueue().then(function (list) {
       list = (list || []).filter(function (x) { return !(x.kind === kind && x.rec && x.rec.id === rec.id); });
       list.push({ kind: kind, rec: rec, at: Date.now(), tries: 0 });
-      return saveQueue(list);
+      return saveQueue(list).then(function () { refreshSnap(list.length); });
     });
   }
 
@@ -223,12 +259,13 @@ window.HesapCalendar = (function () {
           return job.catch(function (e) {
             var tries = (op.tries || 0) + 1;
             if (tries < 8) left.push({ kind: op.kind, rec: op.rec, at: Date.now(), tries: tries });
+            rememberError(e);
             log("takvim kuyruğu: " + op.kind + " " + (op.rec && op.rec.id) + " · " + (e && e.message ? e.message : e));
             if (e && e.code === "auth" && H && H.needAuth) H.needAuth();
           });
         });
       });
-      return chain.then(function () { return saveQueue(left); });
+      return chain.then(function () { return saveQueue(left).then(function () { refreshSnap(left.length); }); });
     }).then(function () { running = false; }, function () { running = false; });
   }
 
@@ -236,6 +273,7 @@ window.HesapCalendar = (function () {
     if (!hasScope() || !hasToken() || !online()) return enqueue(kind, rec);
     var job = kind === "delete" ? deleteEvent(rec) : upsertEvent(rec);
     return job.catch(function (e) {
+      rememberError(e);
       log("takvim " + kind + " ertelendi: " + (e && e.message ? e.message : e));
       if (e && e.code === "auth" && H && H.needAuth) H.needAuth();
       return enqueue(kind, rec);
@@ -304,9 +342,13 @@ window.HesapCalendar = (function () {
   function kick(reason) {
     kicked = true;
     if (hasScope() && hasToken() && online()) {
-      return ensureCalendar().then(function () { return processQueue(); }).then(function () { return backfill(); }).catch(function (e) {
+      return ensureCalendar().then(function () { return processQueue(); }).then(function () { return backfill(); }).then(function () {
+        return loadQueue().then(function (q) { if (!q.length) clearError(); refreshSnap(q.length); });
+      }).catch(function (e) {
+        rememberError(e);
         log("takvim başlatma: " + (e && e.message ? e.message : e));
         if (e && e.code === "auth" && H && H.needAuth) H.needAuth();
+        refreshSnap();
       });
     }
     if (reason === "auth-return") return Promise.resolve();
@@ -328,7 +370,9 @@ window.HesapCalendar = (function () {
         hasToken: hasToken(),
         calendarId: ensuredId || (cfg() && cfg().calendarId) || null,
         denied: !!(cfg() && cfg().calendarDenied),
-        queue: q.length
+        queue: q.length,
+        lastError: snap.lastError || "",
+        status: statusInfo()
       };
     });
   }
@@ -347,6 +391,7 @@ window.HesapCalendar = (function () {
     scopeHasCal: scopeHasCal,
     eventBody: eventBody,
     debug: debug,
+    statusInfo: statusInfo,
     CAL_EVENTS: CAL_EVENTS,
     CAL_APP: CAL_APP,
     CAL_NAME: CAL_NAME

@@ -477,7 +477,7 @@ window.DriveSync = (function () {
       return [t.id, t.type, t.amount, t.categoryId || null, t.note || "", t.date, t.type === "adjust" ? (t.adjustSign === -1 ? -1 : 1) : 0, t.deleted ? 1 : 0];
     }).sort(function (a, b) { return a[0] < b[0] ? -1 : 1; });
     var rems = (s.reminders || []).map(function (r) {
-      return [r.id, r.type, Number(r.amount) || 0, r.categoryId || null, r.date || "", r.repeat || "", r.note || "", r.done ? 1 : 0, r.deleted ? 1 : 0, r.googleEventId || ""];
+      return [r.id, r.type, Number(r.amount) || 0, r.categoryId || null, r.date || "", r.repeat || "", r.note || "", r.done ? 1 : 0, r.deleted ? 1 : 0, r.googleEventId || "", r.groupId || "", r.installmentIndex || 0, r.installmentCount || 0];
     }).sort(function (a, b) { return a[0] < b[0] ? -1 : 1; });
     return JSON.stringify([cats, txs, rems]);
   }
@@ -580,7 +580,8 @@ window.DriveSync = (function () {
     return a.type === b.type && Number(a.amount) === Number(b.amount) &&
       (a.categoryId || null) === (b.categoryId || null) && a.date === b.date &&
       (a.repeat || "") === (b.repeat || "") && (a.note || "") === (b.note || "") &&
-      !!a.done === !!b.done && !!a.deleted === !!b.deleted;
+      !!a.done === !!b.done && !!a.deleted === !!b.deleted &&
+      (a.groupId || "") === (b.groupId || "") && Number(a.installmentIndex || 0) === Number(b.installmentIndex || 0);
   }
   function sameTx(a, b) {
     return a.type === b.type && Number(a.amount) === Number(b.amount) &&
@@ -663,6 +664,14 @@ window.DriveSync = (function () {
         if (!newerR2.googleEventId && olderR2.googleEventId) {
           newerR2 = Object.assign({}, newerR2, { googleEventId: olderR2.googleEventId });
         }
+        if (!newerR2.groupId && olderR2.groupId) {
+          newerR2 = Object.assign({}, newerR2, {
+            groupId: olderR2.groupId,
+            installmentIndex: olderR2.installmentIndex,
+            installmentCount: olderR2.installmentCount,
+            groupTotal: olderR2.groupTotal
+          });
+        }
         remMap[r.id] = newerR2;
         return;
       }
@@ -678,7 +687,7 @@ window.DriveSync = (function () {
       .sort(function (a, b) { return (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0); });
     var txList = Object.keys(txs).map(function (k) { return txs[k]; });
     var remList = Object.keys(remMap).map(function (k) { return remMap[k]; });
-    return { cats: catList, txs: txList, rems: remList, theme: (local.settings && local.settings.theme) || remoteNorm.theme };
+    return { cats: catList, txs: txList, rems: remList, theme: (local.settings && local.settings.theme) || remoteNorm.theme, calendarId: remoteNorm.calendarId || (local.settings && local.settings.calendarId) || null };
   }
 
   function queueOp(op) {
@@ -737,12 +746,12 @@ window.DriveSync = (function () {
       }
       if (localEmpty()) {
         return safetyCopy("eski yedekten göç").then(function () {
-          return A.replaceData(n.cats, n.txs, n.theme, n.rems);
+          return A.replaceData(n.cats, n.txs, n.theme, n.rems, { calendarId: n.calendarId });
         }).then(function () { A.render(); return refreshLocalHash(); }).then(afterLocal);
       }
       var merged = mergeStates(A.state(), n);
       return safetyCopy("eski yedekten birleşim").then(function () {
-        return A.replaceData(merged.cats, merged.txs, merged.theme, merged.rems);
+        return A.replaceData(merged.cats, merged.txs, merged.theme, merged.rems, { calendarId: merged.calendarId });
       }).then(function () { A.render(); return refreshLocalHash(); }).then(afterLocal);
     }).catch(function (e) {
       log("eski yedek görünmedi veya okunamadı · yerel kullanılacak: " + (e.message || e.code || ""));
@@ -898,7 +907,7 @@ window.DriveSync = (function () {
       return safetyCopy("Drive'dan çekmeden önce");
     }).then(function () {
       suppressLocal = true;
-      return A.replaceData(norm.cats, norm.txs, norm.theme, norm.rems);
+      return A.replaceData(norm.cats, norm.txs, norm.theme, norm.rems, { calendarId: norm.calendarId });
     }).then(function () {
       suppressLocal = false;
       return refreshLocalHash();
@@ -938,7 +947,7 @@ window.DriveSync = (function () {
       return safetyCopy("birleştirmeden önce");
     }).then(function () {
       suppressLocal = true;
-      return A.replaceData(merged.cats, merged.txs, merged.theme, merged.rems);
+      return A.replaceData(merged.cats, merged.txs, merged.theme, merged.rems, { calendarId: merged.calendarId });
     }).then(function () {
       suppressLocal = false;
       return refreshLocalHash();
@@ -1244,15 +1253,15 @@ window.DriveSync = (function () {
       calendarSettingsRow();
   }
   function calendarSettingsRow() {
-    var on = hasCalScope();
-    var id = (cfg && cfg.calendarId) || "";
-    var named = id && id !== "primary";
-    var d = on
-      ? (named ? "Hesap Hatırlatmalar takvimine yazılıyor" : "Birincil takvime yazılıyor")
-      : "Hatırlatmaları Gmail takvimine yazmak için izin ver";
-    var k = on ? "Google Takvim bağlı" : "Google Takvim";
-    return '<button class="set-row" data-drv="calendarAuth"><div><div class="k">' + k + '</div><div class="d">' + d +
-      '</div></div><div class="v">' + (on ? "✓" : "›") + '</div></button>';
+    var stt = (window.HesapCalendar && HesapCalendar.statusInfo) ? HesapCalendar.statusInfo() : null;
+    if (!stt) {
+      stt = hasCalScope()
+        ? { k: "ok", t: "Google Takvim: bağlı", d: (cfg && cfg.calendarId && cfg.calendarId !== "primary") ? "Hesap Hatırlatmalar takvimine yazılıyor" : "Takvime yazılıyor" }
+        : { k: "need", t: "Google Takvim: izin gerekli", d: "Hatırlatmaları Gmail takvimine yazmak için izin ver" };
+    }
+    var mark = stt.k === "ok" ? "✓" : (stt.k === "wait" ? "…" : "›");
+    return '<button class="set-row" data-drv="calendarAuth" data-calstatus="' + stt.k + '"><div><div class="k">' + esc(stt.t) + '</div><div class="d">' + esc(stt.d) +
+      '</div></div><div class="v">' + mark + '</div></button>';
   }
   function GLOBO() { return GLOGO; }
 
@@ -1323,7 +1332,7 @@ window.DriveSync = (function () {
           var norm = A.normalize(c.data);
           if (norm.error) { A.toast("Kopya okunamadı"); return; }
           safetyCopy("Güvenlik kopyası yüklenmeden önce").then(function () {
-            return A.replaceData(norm.cats, norm.txs, norm.theme, norm.rems);
+            return A.replaceData(norm.cats, norm.txs, norm.theme, norm.rems, { calendarId: norm.calendarId });
           }).then(function () {
             log("güvenlik kopyası geri yüklendi · " + norm.txs.length + " hareket");
             A.toast("Güvenlik kopyası yüklendi");
@@ -1412,7 +1421,8 @@ window.DriveSync = (function () {
       reminderTitle: function (r) { return A.reminderTitle ? A.reminderTitle(r) : ((r && r.note) || ""); },
       render: function () { if (A.render) A.render(); },
       online: function () { return navigator.onLine !== false; },
-      needAuth: function () { needInteractive = true; status = "auth"; paint(); }
+      needAuth: function () { needInteractive = true; status = "auth"; paint(); },
+      paintSettings: function () { paint(); }
     });
   }
   function kickCalendar(reason) {
@@ -1523,6 +1533,15 @@ window.DriveSync = (function () {
     dotHtml: dotHtml,
     requestCalendar: function () { if (window.HesapCalendar) return HesapCalendar.requestAccess(); },
     hasCalScope: hasCalScope,
+    adoptCalendarId: function (id) {
+      if (!id || !cfg) return;
+      if (!cfg.calendarId) {
+        cfg.calendarId = id;
+        saveCfg();
+        if (window.HesapCalendar && HesapCalendar.kick) HesapCalendar.kick("yedek");
+      }
+    },
+    calendarStatus: function () { return window.HesapCalendar && HesapCalendar.statusInfo ? HesapCalendar.statusInfo() : null; },
     _state: function () { return { cfg: cfg, hasToken: hasToken(), st: st, pending: pending, status: status, needInteractive: needInteractive, localHash: localHash, remote: remote, ownFile: !!(cfg && cfg.ownFile), fileName: FILE_NAME, calendarId: cfg && cfg.calendarId, calendarScope: !!(cfg && cfg.calendarScope) }; }
   };
 })();
